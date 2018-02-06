@@ -37,8 +37,8 @@ class Game:
         self.entity_count = None
 
     def clear_last_turn(self):
-        #self.my_ships = {}
-        self.enemy_ships = {}
+        # self.my_ships = {}
+        #self.enemy_ships = {}
         self.cannonballs = []
         self.barrels = []
         self.mines = []
@@ -174,34 +174,25 @@ class Graph:
         self.map = map
         self.graph = {}
 
-        self.mine_nodes = []
-        self.high_ship_nodes = []
-        self.low_ship_nodes = []
-        self.cannonball_nodes = []
+        self.mine_nodes = set()
+        self.high_ship_nodes = set()
+        self.low_ship_nodes = set()
+        self.cannonball_nodes = set()
 
         # For each combination of x, y, direction and speed find neighbours
         for col, row_list in enumerate(self.map.grid):
             for row , corr_value in enumerate(row_list):
                 for rot in range(6):
                     for spd in range(3):
-                        self.graph[(row, col, rot, spd)] = self.find_neighbours(row, col, rot, spd)
-
-        self.original_graph = copy.deepcopy(self.graph)
+                        self.graph[self.encode_node_key(row, col, rot, spd)] = self.find_neighbours(row, col, rot, spd)
 
     def refresh(self):
-        #self.graph.clear()
-
-        # For each combination of x, y, direction and speed find neighbours
-        for col, row_list in enumerate(self.map.grid):
-            for row , corr_value in enumerate(row_list):
-                for rot in range(6):
-                    for spd in range(3):
-                        self.graph[(row, col, rot, spd)] = self.original_graph[(row, col, rot, spd)]
-
-        #self.graph = copy.deepcopy(self.original_graph)
+        self.mine_nodes.clear()
+        self.high_ship_nodes.clear()
+        self.low_ship_nodes.clear()
+        self.cannonball_nodes.clear()
 
     def find_neighbours(self, row, col, rot, spd):
-
         if spd == 0:
             neighbours = self.speed_0_neighbours(row, col, rot)
         elif spd == 1:
@@ -210,7 +201,6 @@ class Graph:
             neighbours = self.speed_2_neighbours(row, col, rot)
         else:
             raise(Exception('Speed {} is not possible'.format(spd)))
-
         return neighbours
 
     def speed_0_neighbours(self, row, col, rot):
@@ -220,24 +210,12 @@ class Graph:
         # Are both port and starboard turns possible
         for i in (self.map.abs_rotation(position.rotation + 1),
                   self.map.abs_rotation(position.rotation - 1)):
-            # # Bow hit after rotate
-            # bow_pos = position.get_neighbor(self.map.abs_rotation(position.rotation + i))
-            # # Stern hit after rotate
-            # stern_pos = position.get_neighbor(self.map.abs_rotation(position.rotation + i + 3))
-
-            #There are actually valid locations
-            # if not self.map.out_of_range(bow_pos) and \
-            #         not self.map.out_of_range(stern_pos):
-
-            neighbours.append((position.x, position.y, i, 0))
-
-        #if (row, col, rot) == (20,17,1,0)
-
-        new_pos = position.get_neighbor(position.rotation)#.get_neighbor(position.rotation)
+            neighbours.append(Position(position.x, position.y, i, 0))
+        new_pos = position.get_neighbor(position.rotation)
 
         if not self.map.out_of_range(new_pos):
             new_position = position.get_neighbor(position.rotation)
-            neighbours.append((new_position.x, new_position.y, position.rotation, 1))
+            neighbours.append(Position(new_position.x, new_position.y, position.rotation, 1))
 
         return neighbours
 
@@ -252,14 +230,14 @@ class Graph:
             neighbour_position = position.get_neighbor(position.rotation)
 
             if not self.map.out_of_range(neighbour_position):
-                neighbours.append((neighbour_position.x, neighbour_position.y, i, 1))
+                neighbours.append(Position(neighbour_position.x, neighbour_position.y, i, 1))
 
         # Can the boat slow down from 1 to 0
-        neighbours.append((position.x, position.y, position.rotation, 0))
+        neighbours.append(Position(position.x, position.y, position.rotation, 0))
 
         fast_position = position.get_neighbor(position.rotation).get_neighbor(position.rotation)
         if not self.map.out_of_range(fast_position):
-            neighbours.append((fast_position.x, fast_position.y, position.rotation, 2))
+            neighbours.append(Position(fast_position.x, fast_position.y, position.rotation, 2))
 
         return neighbours
 
@@ -274,12 +252,26 @@ class Graph:
             neighbour_position = position.get_neighbor(position.rotation).get_neighbor(position.rotation)
 
             if not self.map.out_of_range(neighbour_position):
-                neighbours.append((neighbour_position.x, neighbour_position.y, i, 2))
+                neighbours.append(Position(neighbour_position.x, neighbour_position.y, i, 2))
 
         # Can the boat slow down from 1 to 0
-        neighbours.append((position.x, position.y, position.rotation, 1))
+        slow_position = position.get_neighbor(position.rotation)
+        neighbours.append(Position(slow_position.x, slow_position.y, position.rotation, 1))
 
         return neighbours
+
+    @staticmethod
+    def encode_node_key(x, y, r, s):
+        # xxyyrs
+        return x*10000 + y*100 + r*10 + s
+
+    @staticmethod
+    def decode_node_key(key):
+        x = int(key/10000)
+        y = int((key - x*10000)/100)
+        r = int((key - x*10000 - y*100)/10)
+        s = int(key - x*10000 - y*100 - r*10)
+        return x, y, r, s
 
     def remove_node(self, row, col, dir=None, spd=None, ship=True, source=None):
         dir = list(range(6)) if dir is None else dir
@@ -288,19 +280,16 @@ class Graph:
         # remove the node and all paths to the node from the index
         for _dir in dir:
             for _spd in spd:
-                if (row, col, _dir, _spd) in self.graph:
-                    #if source is None or source is not None:        # This feature was removed due to time constraints
-                    del self.graph[(row, col, _dir, _spd)]
-                    # elif source == MINE:
-                    #     self.mine_nodes.append((row, col, _dir, _spd))
-                    # elif source == HIGH_SHIP:
-                    #     self.high_ship_nodes.append((row, col, _dir, _spd))
-                    # elif source == LOW_SHIP:
-                    #     self.low_ship_nodes.append((row, col, _dir, _spd))
-                    # elif source == CANNONBALL:
-                    #     self.cannonball_nodes.append((row, col, _dir, _spd))
-                    # else:
-                    #     raise(Exception('{} is not a valid type'))
+                if source == MINE:
+                    self.mine_nodes.add(self.encode_node_key(row, col, _dir, _spd))
+                elif source == HIGH_SHIP:
+                    self.high_ship_nodes.add(self.encode_node_key(row, col, _dir, _spd))
+                elif source == LOW_SHIP:
+                    self.low_ship_nodes.add(self.encode_node_key(row, col, _dir, _spd))
+                elif source == CANNONBALL:
+                    self.cannonball_nodes.add(self.encode_node_key(row, col, _dir, _spd))
+                else:
+                    raise(Exception('{} is not a valid type'))
 
         # If we are removing the node for a ship we need to remove all possible ship positions
         # Every neighbour with a angle pointing directly at the point or directly away from the point
@@ -317,68 +306,65 @@ class Graph:
                 self.remove_node(further_neighbour.x, further_neighbour.y, dir=[self.map.abs_rotation(i + 3)], spd=[2], ship=False, source=source)
 
     def remove_ship_from_graph(self, ship, rem_forward=True, rem_port=True, rem_starboard=True):
-        #start_remove = time.time()
-        #log('removing ship {}'.format(ship.id))
         bow = ship.get_neighbor(ship.rotation)
         stern = ship.get_neighbor(self.map.abs_rotation(ship.rotation + 3))
 
-        #log('remove ({},{})'.format(ship.x, ship.y))
         self.remove_node(ship.x, ship.y, source=HIGH_SHIP)
-
-        #log('remove ({},{})'.format(stern.x, stern.y))
         self.remove_node(stern.x, stern.y, source=HIGH_SHIP)
 
         if rem_forward:
             forward_move = bow.get_neighbor(ship.rotation)
-            #log('remove ({},{})'.format(forward_move.x, forward_move.y))
             self.remove_node(forward_move.x, forward_move.y, source=HIGH_SHIP)
+            if ship.speed == 2:
+                fast_move = forward_move.get_neighbor(ship.rotation)
+                self.remove_node(fast_move.x, fast_move.y, source=HIGH_SHIP)
 
         if ship.speed == 0:
             rotation_point = ship
-        else:
+        elif ship.speed == 1:
             rotation_point = bow
+        else:
+            rotation_point = forward_move
 
         if rem_port:
-            port = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation + 1))
-            #log('remove ({},{})'.format(port.x, port.y))
-            self.remove_node(port.x, port.y, source=HIGH_SHIP)
+            port_bow = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation + 1))
+            self.remove_node(port_bow.x, port_bow.y, source=HIGH_SHIP)
+            port_stern = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation + 4))
+            self.remove_node(port_stern.x, port_stern.y, source=HIGH_SHIP)
 
         if rem_starboard:
-            starboard = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation - 1))
-            #log('remove time ({})'.format(time.time() - start_remove))
-            #log('remove ({},{})'.format(starboard.x, starboard.y))
-            self.remove_node(starboard.x, starboard.y, source=HIGH_SHIP)
-            #log('remove time ({})'.format(time.time() - start_remove))
+            port_bow = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation - 1))
+            self.remove_node(port_bow.x, port_bow.y, source=HIGH_SHIP)
+            port_stern = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation - 4))
+            self.remove_node(port_stern.x, port_stern.y, source=HIGH_SHIP)
 
-        #log('Ship removed')
-        #log('end remove ({})'.format(time.time()-start_remove))
-
-    def neighbours(self, row, col, rot, spd):
-        pos_neighbours = []
-        if (row, col, rot, spd) in self.graph:
-            neighbours = self.graph[(row, col, rot, spd)]
+    def neighbours(self, key):
+        if key in self.graph:
+            return self.graph[key]
         else:
             return []
-        for neighbour in neighbours:
-            pos_neighbours.append(Position(neighbour[0], neighbour[1], neighbour[2], neighbour[3]))
-        return pos_neighbours
 
     def in_grid(self, entity):
         for rot in range(6):
             for spd in range(2):
-                if (entity.x, entity.y, rot, spd) in self.graph:
+                key = self.encode_node_key(entity.x, entity.y, rot, spd)
+                if key not in self.mine_nodes and key not in self.high_ship_nodes:
                     return True
         return False
 
     def find_closest(self, point):
         available = []
-        for neighbour in self.map.neighbours(point):
-            if self.in_grid(neighbour):
-                count = 0
-                for speed in range(3):
-                    for rotation in range(6):
-                        count += len(self.neighbours(neighbour.x, neighbour.y, rotation, speed))
-                available.append([neighbour, count])
+        for x in range(1, 10):
+            for neighbour in self.map.neighbours(point, x):
+                if self.in_grid(neighbour):
+                    count = 0
+                    for speed in range(3):
+                        for rotation in range(6):
+                            count += len(self.neighbours(self.encode_node_key(neighbour.x, neighbour.y, rotation, speed)))
+                    available.append([neighbour, count])
+            if len(available) > 0:
+                break
+
         return sorted(available, key=lambda x: x[1], reverse=True)[0][0]
 
     def find_path(self, ship, entity):
@@ -390,67 +376,72 @@ class Graph:
             return False
 
         frontier = PriorityQueue()
-        frontier.put((0, (ship.x, ship.y, ship.rotation, ship.speed)))
+        frontier.put((0, self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)))
         cost_so_far = {}
         came_from = {}
-        came_from[(ship.x, ship.y, ship.rotation, ship.speed)] = None
-        cost_so_far[(ship.x, ship.y, ship.rotation, ship.speed)] = 0
+        came_from[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)] = None
+        cost_so_far[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)] = 0
 
         # If the node the ship is currently on has been removed we need to replace it.
-        if (ship.x, ship.y, ship.rotation, ship.speed) not in self.graph:
-            self.graph[(ship.x, ship.y, ship.rotation, ship.speed)] = self.find_neighbours(ship.x, ship.y, ship.rotation, ship.speed)
+        # if (ship.x, ship.y, ship.rotation, ship.speed) not in self.graph:
+        #     self.graph[(ship.x, ship.y, ship.rotation, ship.speed)] = self.find_neighbours(ship.x, ship.y, ship.rotation, ship.speed)
 
         points_checked = 0
         while not frontier.empty():
             priority, current = frontier.get()
-            #log('current: {}'.format(current))
 
             points_checked += 1
             if points_checked % 20 == 0:
                 log('WARNING: path > {}'.format(points_checked))
-
-                if points_checked % 400 == 0:
+                if points_checked % 300 == 0:
                     return False
 
-            if current[0] == entity.x and current[1] == entity.y:
-                # log('break')
+            cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
+            #log('{} {} {} {}'.format(cur_x, cur_y, cur_r, cur_s))
+
+            if cur_x == entity.x and cur_y == entity.y:
                 break
 
-            for next in self.neighbours(current[0], current[1], current[2], current[3]):
+            for next in self.neighbours(current):
                 # log('next: ({},{}) {} {}'.format(next.x, next.y, next.rotation, next.speed))
+                next_key = self.encode_node_key(next.x, next.y, next.rotation, next.speed)
 
                 # Speed modifier - we prefer moving over not moving
-                speed_mod = 1 if current[3] > 0 else 1.2
+                speed_mod = 1 if cur_s > 0 else 1.6
 
-                # Prefer straight moving moves over non-straight
-                if next.speed == current[3] and next.speed > 0 and next.rotation == current[2]:
+                # Can we make a non-movement action?
+                if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
                     straight_mod = 1
                 else:
-                    straight_mod = 1.2
+                    straight_mod = 1.3
 
-                # if next in self.mine_nodes or next in self.high_ship_nodes:
-                #     add_cost = 20
-                #     log('Added')
-                # else:
-                #     add_cost = 0
+                if next_key in self.mine_nodes:
+                    add_cost = 15       # This is a little more than a full back out of a hole and moving round
+                    log('Added additional cost')
+                elif next_key in self.high_ship_nodes:
+                    add_cost = 3       # This is a little more than a full back out of a hole and moving round
+                    log('Added additional cost')
+                else:
+                    add_cost = 0
 
-                cost = (1 * speed_mod * straight_mod)# + add_cost
+                cost = (1 * speed_mod * straight_mod) + add_cost
 
-                new_cost = cost_so_far[(current[0], current[1], current[2], current[3])] + cost
+                new_cost = cost_so_far[current] + cost
                 # log('cost_so_far: {}, new_cost: {}'.format(cost_so_far[(current[0], current[1])], new_cost))
-                if (next.x, next.y, next.rotation, next.speed) not in cost_so_far or new_cost < cost_so_far[(next.x, next.y, next.rotation, next.speed)]:
-                    if (next.x, next.y, next.rotation, next.speed) not in self.graph:
+                if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
+                    if next_key not in self.graph:
+                        log('Not in graph, do i need this?')
                         continue
 
-                    cost_so_far[(next.x, next.y, next.rotation, next.speed)] = new_cost
+                    cost_so_far[next_key] = new_cost
                     # log('cost_so_far: {}'.format(new_cost))
-                    priority = new_cost + entity.calculate_distance_between(Position(next.x, next.y))
+                    priority = new_cost + entity.calculate_distance_between(next)
                     # log('priority: {}'.format(priority))
                     # log('{} {} {} {}'.format(current[0], current[1], current[2], current[3]))
                     # log('{} {} {} {}'.format(next.x, next.y, next.rotation, next.speed))
-                    frontier.put((priority, (next.x, next.y, next.rotation, next.speed)))
+                    frontier.put((priority, next_key))
                     # log('frontier.put({}, ({}, {}))'.format(priority, next.x, next.y))
-                    came_from[(next.x, next.y, next.rotation, next.speed)] = current
+                    came_from[next_key] = current
                     # log('came_from: {} {} = {}'.format(next.x, next.y, current))
 
         log('points checked: {}'.format(points_checked))
@@ -458,8 +449,8 @@ class Graph:
         searching = True
         current_point = ()
         for angle in range(6):
-            for speed in range(2):
-                if (entity.x, entity.y, angle, speed) in came_from:
+            for speed in range(3):
+                if self.encode_node_key(entity.x, entity.y, angle, speed) in came_from:
                     current_point = (entity.x, entity.y, angle, speed)
                     break
 
@@ -469,15 +460,21 @@ class Graph:
                 break
 
         if current_point == ():
+            log('Point was unreachable - this should no longer be possible...')
             return False
 
+        ship_key = self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)
+        current_key = self.encode_node_key(current_point[0], current_point[1], current_point[2], current_point[3])
         path = [current_point]
         while searching:
-            if came_from[current_point] is None or came_from[current_point] == (ship.x, ship.y, ship.rotation, ship.speed):
+            if came_from[current_key] is None or came_from[current_key] == ship_key:
                 searching = False
             else:
-                path.append(came_from[current_point])
-                current_point = path[-1]
+                key = came_from[current_key]
+                x, y, r, s = self.decode_node_key(key)
+                current_point = (x, y, r, s)
+                path.append(current_point)
+                current_key = key
 
         path.append((ship.x, ship.y, ship.rotation, ship.speed))
 
@@ -523,17 +520,19 @@ class Map:
             # if not self.out_of_range(move):
             #     self.grid[move.y][move.x] = ship_number
 
-    def neighbours(self, position, safe=True):
+    def neighbours(self, position, safe=True, search_range=1):
         position_neighbours = []
         for i in range(6):
             neighbour_position = position.get_neighbor(i)
+            for _ in range(search_range-1):
+                neighbour_position = neighbour_position.get_neighbor(i)
             if safe:
-                if 0 <= neighbour_position.y < self.x and 0 <= neighbour_position.x < self.x:
-                    if self.grid[neighbour_position.y][neighbour_position.x] == 0:
-                        position_neighbours.append(position.get_neighbor(i))
+                if 0 <= neighbour_position.y < self.y and 0 <= neighbour_position.x < self.x:
+                    if self.grid[neighbour_position.y][neighbour_position.x] != 1:
+                        position_neighbours.append(neighbour_position.get_neighbor(i))
             else:
                 if 0 <= neighbour_position.y < self.x and 0 <= neighbour_position.x < self.x:
-                    position_neighbours.append(position.get_neighbor(i))
+                    position_neighbours.append(neighbour_position.get_neighbor(i))
         return position_neighbours
 
     @staticmethod
@@ -650,13 +649,14 @@ class Ship(Entity):
 
     def fire(self, entity):
         if isinstance(entity, Ship) or entity.speed == 0:
+            bow = self.get_neighbor(self.rotation)
             current_speed = entity.speed
-            estimated_location = Position(entity.x, entity.y).get_neighbor(entity.rotation)
-            for t in range(1, 10):
+            estimated_location = Position(entity.x, entity.y)
+            for t in range(0, 10):
                 for _ in range(current_speed):
                     estimated_location = estimated_location.get_neighbor(entity.rotation)
 
-                fire_time = int(round(1 + (self.calculate_distance_between(estimated_location) / 3)))
+                fire_time = int(round(1 + (bow.calculate_distance_between(estimated_location) / 3)))
 
                 if fire_time <= t:
                     self.fire_x, self.fire_y = estimated_location.x, estimated_location.y
@@ -739,7 +739,7 @@ class Ship(Entity):
         self.action()
 
     def navigate(self, entity):
-        if self.graph.in_grid(entity):
+        if not self.graph.in_grid(entity):
             entity = self.graph.find_closest(entity)
 
         path = self.graph.find_path(self, entity)
@@ -898,7 +898,7 @@ class AI:
                 closest_barrel, distance_to_closest_barrel = self.get_closest_entity(ship, self.game.barrels)
 
                 if len(self.game.barrels) > 0:
-                    log('ship ({}) navigating to barrel'.format(id))
+                    log('ship ({}) navigating to barrel ({})'.format(id, closest_barrel.id))
                     result = ship.navigate(closest_barrel)
                     if not result:
                         x = closest_ship.x - 4 if closest_ship.x > 10 else closest_ship.x + 4
@@ -930,6 +930,7 @@ class AI:
                         ship.no_action()
 
             for id, ship in self.game.my_ships.items():
+                log(str(ship.action))
                 ship.print_action()
 
             time_b = time.time()

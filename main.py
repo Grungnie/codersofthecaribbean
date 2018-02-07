@@ -300,22 +300,24 @@ class Graph:
 
         # Can the boat slow down from 1 to 0
         slow_position = position.get_neighbor(position.rotation)
-        neighbours.append(Position(slow_position.x, slow_position.y, position.rotation, 1))
+        if not self.map.out_of_range(slow_position):
+            neighbours.append(Position(slow_position.x, slow_position.y, position.rotation, 1))
 
         return neighbours
 
     @staticmethod
-    def encode_node_key(x, y, r, s):
+    def encode_node_key(x, y, r, s, w=0):
         # xxyyrs
-        return x*10000 + y*100 + r*10 + s
+        return w*1000000 + x*10000 + y*100 + r*10 + s
 
     @staticmethod
     def decode_node_key(key):
-        x = int(key/10000)
-        y = int((key - x*10000)/100)
-        r = int((key - x*10000 - y*100)/10)
-        s = int(key - x*10000 - y*100 - r*10)
-        return x, y, r, s
+        w = int( key/1000000)
+        x = int((key - w*1000000)/10000)
+        y = int((key - w*1000000 - x*10000)/100)
+        r = int((key - w*1000000 - x*10000 - y*100)/10)
+        s = int( key - w*1000000 - x*10000 - y*100 - r*10)
+        return w, x, y, r, s
 
     def remove_node(self, row, col, dir=None, spd=None, ship=True, source=None, timestep=None):
         dir = list(range(6)) if dir is None else dir
@@ -429,39 +431,43 @@ class Graph:
         if cur.speed > 0:
             speed_1 = pre.get_neighbor(self.map.abs_rotation(pre.rotation)).get_neighbor(self.map.abs_rotation(pre.rotation))
             if entity.x == speed_1.x and entity.y == speed_1.y:
-                log('Got with speed_1')
+                # log('Got with speed_1')
                 return True
 
             if cur.speed > 1:
                 speed_2 = speed_1.get_neighbor(self.map.abs_rotation(pre.rotation))
                 if entity.x == speed_2.x and entity.y == speed_2.y:
-                    log('Got with speed_2')
+                    # log('Got with speed_2')
                     return True
 
         if cur.rotation != pre.rotation:
             bow = cur.get_neighbor(cur.rotation)
             if entity.x == bow.x and entity.y == bow.y:
-                log('Got with bow_rot')
+                # log('Got with bow_rot')
                 return True
 
             stern = cur.get_neighbor(self.map.abs_rotation(cur.rotation + 3))
             if entity.x == stern.x and entity.y == stern.y:
-                log('Got with stern_rot')
+                # log('Got with stern_rot')
                 return True
 
         return False
 
-    def find_path(self, ship, entity):
+    def find_path(self, ship, entity, waypoints=None):
+        waypoints = [entity] if waypoints is None else [entity] + waypoints
+
         start_time = time.time()
         if not self.in_grid(entity):
             return False
 
         frontier = []
-        heapq.heappush(frontier, (0, (self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed), 0)))
+        heapq.heappush(frontier, (0, (self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed, 0), 0)))
         cost_so_far = {}
         came_from = {}
-        came_from[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)] = None
-        cost_so_far[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)] = 0
+        came_from[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed, 0)] = None
+        cost_so_far[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed, 0)] = 0
+
+        distance_costs = [waypoints[x].calculate_distance_between(waypoints[x+1]) for x in range(len(waypoints)-1)] + [0]
 
         final_point = None
 
@@ -483,42 +489,52 @@ class Graph:
                 if points_checked % 150 == 0:
                     return False
 
-            cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
+            current_waypoint, cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
+            current_no_w = current - (current_waypoint*1000000)
 
+            log('{} {} {} {} {}'.format(current_waypoint, cur_x, cur_y, cur_r, cur_s))
+
+            # Check if we have reached the last waypoint
             if came_from[current] is not None:
-                pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
-
-                final_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), Position(pre_x, pre_y, pre_r, pre_s), entity)
+                pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
+                final_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), Position(pre_x, pre_y, pre_r, pre_s), waypoints[-1])
                 if final_point:
-                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s)
+                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
                     break
             else:
-                if cur_x == entity.x and cur_y == entity.y:
-                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s)
+                if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
+                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
                     break
+
+            # Check if we have reached the next waypoint
+            if came_from[current] is not None:
+                pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
+
+                current_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s),
+                                                  Position(pre_x, pre_y, pre_r, pre_s), waypoints[current_waypoint])
+                if current_point:
+                    current_waypoint += 1
+            else:
+                if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
+                    current_waypoint += 1
 
             #log('time 2: {:0.2f}'.format((time.time() - start_time)*10000, 2))
 
-            for next in self.neighbours(current):
+            for next in self.neighbours(current_no_w):
                 #start_time = time.time()
                 # log('next: ({},{}) {} {}'.format(next.x, next.y, next.rotation, next.speed))
-                next_key = self.encode_node_key(next.x, next.y, next.rotation, next.speed)
+                next_key = self.encode_node_key(next.x, next.y, next.rotation, next.speed, current_waypoint)
+                next_key_no_w = self.encode_node_key(next.x, next.y, next.rotation, next.speed)
 
-                # Speed modifier - we prefer moving over not moving
-                speed_mod = 1.2 if cur_s > 0 else 1
 
-                # Can we make a non-movement action?
-                if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
-                    straight_mod = 1
-                else:
-                    straight_mod = 1.3
+                straight_mod, speed_mod = 1, 1
 
                 #log('time 3: {:0.2f}'.format((time.time() - start_time)*10000, 4))
                 #start_time = time.time()
 
                 time_cost = False
                 for test_step in [timestep-x for x in range(-2,3) if 14 >= timestep-x >= 0 ]:
-                    if next_key in self.cannonball_nodes[test_step]:
+                    if next_key_no_w in self.cannonball_nodes[test_step]:
                         time_cost = True
                         break
 
@@ -527,20 +543,29 @@ class Graph:
 
                 if time_cost:
                     add_cost = 80
-                elif next_key in self.mine_nodes:
+                elif next_key_no_w in self.mine_nodes:
                     add_cost = 60       # This is a little more than a full back out of a hole and moving round
-                elif next_key in self.high_ship_nodes:
+                elif next_key_no_w in self.high_ship_nodes:
                     add_cost = 40 / (1 + timestep**2)
                 else:
                     soft_time_cost = False
                     for test_step in [timestep - x for x in range(-2, 3) if 14 >= timestep - x >= 0]:
-                        if next_key in self.cannonball_soft_nodes[test_step]:
+                        if next_key_no_w in self.cannonball_soft_nodes[test_step]:
                             soft_time_cost = True
                             break
 
                     if soft_time_cost:
                         add_cost = 2
                     else:
+                        # Speed modifier - we prefer moving over not moving
+                        speed_mod = 1.2 if cur_s > 0 else 1
+
+                        # Can we make a non-movement action?
+                        if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
+                            straight_mod = 1
+                        else:
+                            straight_mod = 1.3
+
                         add_cost = 0
 
                 #log('time 5: {:0.2f}'.format((time.time() - start_time)*10000, 4))
@@ -553,7 +578,9 @@ class Graph:
                 if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
                     cost_so_far[next_key] = new_cost
                     # log('cost_so_far: {}'.format(new_cost))
-                    priority = new_cost + entity.calculate_distance_between(next)
+                    distance_cost = sum(distance_costs[current_waypoint:]) * 1.4
+                    target_cost = waypoints[current_waypoint].calculate_distance_between(next) * 1.4
+                    priority = new_cost + target_cost + distance_cost
                     # log('priority: {}'.format(priority))
 
                     # log('{} {} {} {}'.format(current[0], current[1], current[2], current[3]))
@@ -567,7 +594,7 @@ class Graph:
 
         log('points checked: {}'.format(points_checked))
 
-        if final_point is None:
+        if final_point is None or final_point == False:
             log('No path from ({},{}) to ({},{})'.format(ship.x, ship.y, entity.x, entity.y))
             return False
 
@@ -582,12 +609,14 @@ class Graph:
                 break
             else:
                 key = came_from[current_key]
-                x, y, r, s = self.decode_node_key(key)
+                w, x, y, r, s = self.decode_node_key(key)
                 current_point = (x, y, r, s)
                 path.append(current_point)
                 current_key = key
 
         path.append((ship.x, ship.y, ship.rotation, ship.speed))
+
+        log(str(path))
 
         return path
 
@@ -731,6 +760,7 @@ class Ship(Entity):
         self.rum = rum
         self.graph = graph
         self.navigate_action = None
+        self.next_waypoint = None
 
         self.waypoints = [Position(5,5),
                           Position(11, 4),
@@ -898,15 +928,24 @@ class Ship(Entity):
     def print_action(self):
         self.action()
 
-    def navigate(self, entity):
+    def navigate(self, entity, waypoints=None):
+        waypoints = [] if waypoints is None else waypoints
         if not self.graph.in_grid(entity):
             entity = self.graph.find_closest(entity)
+        new_waypoints = []
+        for waypoint in waypoints:
+            if not self.graph.in_grid(waypoint):
+                new_waypoints.append(self.graph.find_closest(waypoint))
+            else:
+                new_waypoints.append(waypoint)
 
-        path = self.graph.find_path(self, entity)
+        path = self.graph.find_path(self, entity, waypoints=new_waypoints)
         if path == False:
             return False
         self.navigate_action = self.determine_move(path[-2:])
         self.action = self._print_navigate
+
+        log('navigate_action: {}'.format(self.navigate_action))
         return True
 
     def should_avoid(self, enemy_ships):
@@ -923,13 +962,28 @@ class Ship(Entity):
         #log(enemy_ships)
         if self.waypoint is None or self.calculate_distance_between(self.waypoints[self.waypoint]) <= 3:
             ordered_waypoints = self.ordered_waypoints(enemy_ships)[:3]
-            #log('ordered_waypoints: ' + str(ordered_waypoints))
-            different = False
-            while not different:
-                new_waypoint = random.choice(ordered_waypoints)
-                if new_waypoint != self.waypoint:
-                    self.waypoint = new_waypoint
-                    different = True
+
+            if self.next_waypoint in ordered_waypoints:
+                self.waypoint = self.next_waypoint
+                different2 = False
+                while not different2:
+                    next_waypoint = random.choice(ordered_waypoints)
+                    if next_waypoint != self.waypoint:
+                        self.next_waypoint = next_waypoint
+                        different2 = True
+            else:
+                different = False
+                while not different:
+                    new_waypoint = random.choice(ordered_waypoints)
+                    if new_waypoint != self.waypoint:
+                        self.waypoint = new_waypoint
+                        different2 = False
+                        while not different2:
+                            next_waypoint = random.choice(ordered_waypoints)
+                            if next_waypoint != self.waypoint:
+                                self.next_waypoint = next_waypoint
+                                different2 = True
+                        different = True
 
         if self.graph.in_grid(Position(self.waypoints[self.waypoint].x, self.waypoints[self.waypoint].y)):
             nav = Position(self.waypoints[self.waypoint].x, self.waypoints[self.waypoint].y)
@@ -941,6 +995,8 @@ class Ship(Entity):
     def determine_move(self, moves):
         #log(str(moves))
         action = None
+
+        moves = [moves[0][-4:], moves[1][-4:]]
 
         if moves[1][3] == moves[0][3]:
             if moves[1][2] == moves[0][2]:
@@ -1075,14 +1131,31 @@ class AI:
             assigned_ships = set()
             if len(self.game.barrels) > 0:
                 barrel_barrel_distances = self.barrel_barrel_distances(self.game.barrels)
-                for barrel_ship in self.barrel_ship_distances(self.game.my_ships, self.game.barrels):
+                barrel_ship_distances = self.barrel_ship_distances(self.game.my_ships, self.game.barrels)
+                for i, barrel_ship in enumerate(barrel_ship_distances):
                     if len(taken_barrels) >= len(self.game.barrels) or len(assigned_ships) >= len(self.game.my_ships):
                         break
                     if barrel_ship[0].id in taken_barrels or barrel_ship[1].id in assigned_ships:
                         continue
 
                     log('ship ({}) navigating to barrel ({})'.format(barrel_ship[1].id, barrel_ship[0].id))
-                    result = barrel_ship[1].navigate(barrel_ship[0])
+
+                    # Get possible next barrel
+                    next_barrel = None
+                    for barrel in barrel_barrel_distances[barrel_ship[0].id]:
+                        if barrel[0].id not in taken_barrels and barrel[0].id != barrel_ship[0].id:
+                            next_barrel = barrel[0]
+                            break
+
+                    if next_barrel is None:
+                        if barrel_ship[1].next_waypoint is None:
+                            ordered_waypoints = barrel_ship[1].ordered_waypoints(self.game.enemy_ships)[:3]
+                            next_barrel_id = random.choice(ordered_waypoints)
+                            barrel_ship[1].next_waypoint = next_barrel_id
+
+                        next_barrel = barrel_ship[1].waypoints[barrel_ship[1].next_waypoint]
+
+                    result = barrel_ship[1].navigate(barrel_ship[0], [next_barrel])
                     if result:
                         assigned_ships.add(barrel_ship[1].id)
                         taken_barrels.add(barrel_ship[0].id)

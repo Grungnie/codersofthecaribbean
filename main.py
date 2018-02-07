@@ -418,6 +418,39 @@ class Graph:
 
         return sorted(available, key=lambda x: x[1], reverse=True)[0][0]
 
+    def check_for_goal(self, cur, pre, entity):
+        # The pre-state should not have any points
+        # Speed 1 adds two to the base
+        # Speed 2 adds three to the base
+        # Rotate on the new point
+        if entity.x == cur.x and entity.y == cur.y:
+            return True
+
+        if cur.speed > 0:
+            speed_1 = pre.get_neighbor(self.map.abs_rotation(pre.rotation)).get_neighbor(self.map.abs_rotation(pre.rotation))
+            if entity.x == speed_1.x and entity.y == speed_1.y:
+                log('Got with speed_1')
+                return True
+
+            if cur.speed > 1:
+                speed_2 = speed_1.get_neighbor(self.map.abs_rotation(pre.rotation))
+                if entity.x == speed_2.x and entity.y == speed_2.y:
+                    log('Got with speed_2')
+                    return True
+
+        if cur.rotation != pre.rotation:
+            bow = cur.get_neighbor(cur.rotation)
+            if entity.x == bow.x and entity.y == bow.y:
+                log('Got with bow_rot')
+                return True
+
+            stern = cur.get_neighbor(self.map.abs_rotation(cur.rotation + 3))
+            if entity.x == stern.x and entity.y == stern.y:
+                log('Got with stern_rot')
+                return True
+
+        return False
+
     def find_path(self, ship, entity):
         start_time = time.time()
         if not self.in_grid(entity):
@@ -429,6 +462,8 @@ class Graph:
         came_from = {}
         came_from[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)] = None
         cost_so_far[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)] = 0
+
+        final_point = None
 
         # If the node the ship is currently on has been removed we need to replace it.
         # if (ship.x, ship.y, ship.rotation, ship.speed) not in self.graph:
@@ -449,10 +484,18 @@ class Graph:
                     return False
 
             cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
-            #log('{} {} {} {}'.format(cur_x, cur_y, cur_r, cur_s))
 
-            if cur_x == entity.x and cur_y == entity.y:
-                break
+            if came_from[current] is not None:
+                pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
+
+                final_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), Position(pre_x, pre_y, pre_r, pre_s), entity)
+                if final_point:
+                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s)
+                    break
+            else:
+                if cur_x == entity.x and cur_y == entity.y:
+                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s)
+                    break
 
             #log('time 2: {:0.2f}'.format((time.time() - start_time)*10000, 2))
 
@@ -483,11 +526,11 @@ class Graph:
                 #start_time = time.time()
 
                 if time_cost:
-                    add_cost = 40
+                    add_cost = 80
                 elif next_key in self.mine_nodes:
-                    add_cost = 30       # This is a little more than a full back out of a hole and moving round
+                    add_cost = 60       # This is a little more than a full back out of a hole and moving round
                 elif next_key in self.high_ship_nodes:
-                    add_cost = 15 / (1 + timestep**2)
+                    add_cost = 40 / (1 + timestep**2)
                 else:
                     soft_time_cost = False
                     for test_step in [timestep - x for x in range(-2, 3) if 14 >= timestep - x >= 0]:
@@ -524,29 +567,19 @@ class Graph:
 
         log('points checked: {}'.format(points_checked))
 
-        searching = True
-        current_point = ()
-        for angle in range(6):
-            for speed in range(3):
-                if self.encode_node_key(entity.x, entity.y, angle, speed) in came_from:
-                    current_point = (entity.x, entity.y, angle, speed)
-                    break
-
-                if current_point != ():
-                    break
-            if current_point != ():
-                break
-
-        if current_point == ():
-            # log('Point was unreachable - this should no longer be possible...')
+        if final_point is None:
+            log('No path from ({},{}) to ({},{})'.format(ship.x, ship.y, entity.x, entity.y))
             return False
 
+        current_key = final_point
+        current_point = self.decode_node_key(current_key)
+
         ship_key = self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)
-        current_key = self.encode_node_key(current_point[0], current_point[1], current_point[2], current_point[3])
         path = [current_point]
-        while searching:
+
+        while True:
             if came_from[current_key] is None or came_from[current_key] == ship_key:
-                searching = False
+                break
             else:
                 key = came_from[current_key]
                 x, y, r, s = self.decode_node_key(key)
@@ -1035,7 +1068,7 @@ class AI:
         while True:
             time_a = time.time()
 
-            self.game.update_map(load='3')
+            self.game.update_map(load=False)
 
             # Assign barrels
             taken_barrels = set()

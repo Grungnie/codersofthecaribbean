@@ -483,11 +483,11 @@ class Graph:
                 #start_time = time.time()
 
                 if time_cost:
-                    add_cost = 35
+                    add_cost = 40
                 elif next_key in self.mine_nodes:
-                    add_cost = 25       # This is a little more than a full back out of a hole and moving round
+                    add_cost = 30       # This is a little more than a full back out of a hole and moving round
                 elif next_key in self.high_ship_nodes:
-                    add_cost = 20 / (1 + timestep**2)
+                    add_cost = 15 / (1 + timestep**2)
                 else:
                     soft_time_cost = False
                     for test_step in [timestep - x for x in range(-2, 3) if 14 >= timestep - x >= 0]:
@@ -1020,27 +1020,50 @@ class AI:
                 closest_enemy_ship = enemy_ship
         return closest_enemy_ship, closest_distance
 
+    def barrel_ship_distances(self, ships, barrels):
+        distances = [(barrel, ship, ship.calculate_distance_between(barrel)) for ship in ships.values() for barrel in barrels]
+        return sorted(distances, key=lambda x: x[2])
+
+    def barrel_barrel_distances(self, barrels):
+        barrel_distances = {}
+        for barrel1 in barrels:
+            barrel_distances[barrel1.id] = sorted([(barrel2, barrel1.calculate_distance_between(barrel2)) for barrel2 in barrels if barrel2.id != barrel1.id], key=lambda x: x[1])
+        return barrel_distances
+
     def run(self):
         while True:
             time_a = time.time()
 
             self.game.update_map(load=False)
-            taken_barrels = []
+
+            # Assign barrels
+            taken_barrels = set()
+            assigned_ships = []
+            if len(self.game.barrels) > 0:
+                barrel_barrel_distances = self.barrel_barrel_distances(self.game.barrels)
+                for barrel_ship in self.barrel_ship_distances(self.game.my_ships, self.game.barrels):
+                    if len(taken_barrels) >= len(self.game.barrels) or len(assigned_ships) >= len(self.game.my_ships):
+                        break
+                    if barrel_ship[0].id in taken_barrels:
+                        continue
+
+                    log('ship ({}) navigating to barrel ({})'.format(barrel_ship[1].id, barrel_ship[0].id))
+                    result = barrel_ship[1].navigate(barrel_ship[0])
+                    if result:
+                        assigned_ships.append(barrel_ship[1].id)
+
+                        taken_barrels.add(barrel_ship[1].id)
+
+                        log(str(barrel_ship[0].id))
+                        log(str(barrel_barrel_distances[barrel_ship[0].id]))
+
+                        for dist_barrel in barrel_barrel_distances[barrel_ship[0].id]:
+                            if dist_barrel[1] <= 2:
+                                taken_barrels.add(dist_barrel[0].id)
 
             for id, ship in self.game.my_ships.items():
                 timer.print('ship {}'.format(id))
                 closest_ship, distance_to_closest_ship = self.get_closest_enemy_ship(ship, self.game.enemy_ships)
-
-                #log('closest_ship({}): ({},{})'.format(closest_ship.id, closest_ship.x, closest_ship.y))
-
-                if len(self.game.barrels) > 0:
-                    closest_barrel, distance_to_closest_barrel = self.get_closest_entity(ship, self.game.barrels,
-                                                                                         ignore=taken_barrels)
-                    if closest_barrel is not None:
-                        log('ship ({}) navigating to barrel ({})'.format(id, closest_barrel.id))
-                        result = ship.navigate(closest_barrel)
-                        if result:
-                            taken_barrels.append(closest_barrel.id)
 
                 if ship.navigate_action is None or ship.action is None:
                     # Start a grid based movement pattern

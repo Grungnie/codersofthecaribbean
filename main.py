@@ -467,6 +467,8 @@ class Graph:
         came_from[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed, 0)] = None
         cost_so_far[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed, 0)] = 0
 
+        solutions = []
+
         distance_costs = [waypoints[x].calculate_distance_between(waypoints[x+1]) for x in range(len(waypoints)-1)] + [0]
 
         final_point = None
@@ -492,7 +494,7 @@ class Graph:
             current_waypoint, cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
             current_no_w = current - (current_waypoint*1000000)
 
-            log('{} {} {} {} {}'.format(current_waypoint, cur_x, cur_y, cur_r, cur_s))
+            #log('{} {} {} {} {}'.format(current_waypoint, cur_x, cur_y, cur_r, cur_s))
 
             # Check if we have reached the last waypoint
             if came_from[current] is not None:
@@ -500,21 +502,24 @@ class Graph:
                 final_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), Position(pre_x, pre_y, pre_r, pre_s), waypoints[-1])
                 if final_point:
                     final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
-                    break
+                    solutions.append(final_point)
+                    if len(solutions) > 2:
+                        break
             else:
                 if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
                     final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
-                    break
+                    solutions.append(final_point)
+                    if len(solutions) > 2:
+                        break
 
             # Check if we have reached the next waypoint
-            if came_from[current] is not None:
+            if came_from[current] is not None and current_waypoint < (len(waypoints)-1):
                 pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
-
                 current_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s),
                                                   Position(pre_x, pre_y, pre_r, pre_s), waypoints[current_waypoint])
                 if current_point:
                     current_waypoint += 1
-            else:
+            elif current_waypoint < (len(waypoints)-1):
                 if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
                     current_waypoint += 1
 
@@ -578,8 +583,8 @@ class Graph:
                 if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
                     cost_so_far[next_key] = new_cost
                     # log('cost_so_far: {}'.format(new_cost))
-                    distance_cost = sum(distance_costs[current_waypoint:]) * 1.4
-                    target_cost = waypoints[current_waypoint].calculate_distance_between(next) * 1.4
+                    distance_cost = sum(distance_costs[current_waypoint:]) * 1.6
+                    target_cost = waypoints[current_waypoint].calculate_distance_between(next) * 1.6
                     priority = new_cost + target_cost + distance_cost
                     # log('priority: {}'.format(priority))
 
@@ -590,7 +595,12 @@ class Graph:
                     came_from[next_key] = current
                     # log('came_from: {} {} = {}'.format(next.x, next.y, current))
 
-
+        lowest_cost = 100000
+        final_point = None
+        for solution in solutions:
+            if cost_so_far[solution] < lowest_cost:
+                lowest_cost = cost_so_far[solution]
+                final_point = solution
 
         log('points checked: {}'.format(points_checked))
 

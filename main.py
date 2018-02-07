@@ -1022,7 +1022,8 @@ class AI:
 
     def barrel_ship_distances(self, ships, barrels):
         distances = [(barrel, ship, ship.calculate_distance_between(barrel)) for ship in ships.values() for barrel in barrels]
-        return sorted(distances, key=lambda x: x[2])
+        sorted_distances = sorted(distances, key=lambda x: x[2])
+        return sorted_distances
 
     def barrel_barrel_distances(self, barrels):
         barrel_distances = {}
@@ -1034,25 +1035,24 @@ class AI:
         while True:
             time_a = time.time()
 
-            self.game.update_map(load=False)
+            self.game.update_map(load='3')
 
             # Assign barrels
             taken_barrels = set()
-            assigned_ships = []
+            assigned_ships = set()
             if len(self.game.barrels) > 0:
                 barrel_barrel_distances = self.barrel_barrel_distances(self.game.barrels)
                 for barrel_ship in self.barrel_ship_distances(self.game.my_ships, self.game.barrels):
                     if len(taken_barrels) >= len(self.game.barrels) or len(assigned_ships) >= len(self.game.my_ships):
                         break
-                    if barrel_ship[0].id in taken_barrels:
+                    if barrel_ship[0].id in taken_barrels or barrel_ship[1].id in assigned_ships:
                         continue
 
                     log('ship ({}) navigating to barrel ({})'.format(barrel_ship[1].id, barrel_ship[0].id))
                     result = barrel_ship[1].navigate(barrel_ship[0])
                     if result:
-                        assigned_ships.append(barrel_ship[1].id)
-
-                        taken_barrels.add(barrel_ship[1].id)
+                        assigned_ships.add(barrel_ship[1].id)
+                        taken_barrels.add(barrel_ship[0].id)
 
                         log(str(barrel_ship[0].id))
                         log(str(barrel_barrel_distances[barrel_ship[0].id]))
@@ -1060,6 +1060,9 @@ class AI:
                         for dist_barrel in barrel_barrel_distances[barrel_ship[0].id]:
                             if dist_barrel[1] <= 2:
                                 taken_barrels.add(dist_barrel[0].id)
+                                log('taken: {}'.format(dist_barrel[0].id))
+                            else:
+                                break
 
             for id, ship in self.game.my_ships.items():
                 timer.print('ship {}'.format(id))

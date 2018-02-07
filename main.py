@@ -22,6 +22,11 @@ LOW_SHIP = 6    # Low probability ship_location
 CANNONBALL = 7
 SOFT_CANNONBALL = 8
 
+# Lay mine
+NO = 0
+YES = 1
+MAYBE = 2
+
 
 def log(info):
     print(info, file=sys.stderr, flush=True)
@@ -468,6 +473,7 @@ class Graph:
         cost_so_far[self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed, 0)] = 0
 
         solutions = []
+        ok_solutions = []
 
         distance_costs = [waypoints[x].calculate_distance_between(waypoints[x+1]) for x in range(len(waypoints)-1)] + [0]
 
@@ -503,13 +509,13 @@ class Graph:
                 if final_point:
                     final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
                     solutions.append(final_point)
-                    if len(solutions) > 2:
+                    if len(solutions) > 3:
                         break
             else:
                 if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
                     final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
                     solutions.append(final_point)
-                    if len(solutions) > 2:
+                    if len(solutions) > 3:
                         break
 
             # Check if we have reached the next waypoint
@@ -517,10 +523,15 @@ class Graph:
                 pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
                 current_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s),
                                                   Position(pre_x, pre_y, pre_r, pre_s), waypoints[current_waypoint])
+                if current_waypoint == 0:
+                    ok_solutions.append(current_point)
                 if current_point:
                     current_waypoint += 1
             elif current_waypoint < (len(waypoints)-1):
                 if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
+                    if current_waypoint == 0:
+                        current_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
+                        ok_solutions.append(current_point)
                     current_waypoint += 1
 
             #log('time 2: {:0.2f}'.format((time.time() - start_time)*10000, 2))
@@ -569,7 +580,7 @@ class Graph:
                         if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
                             straight_mod = 1
                         else:
-                            straight_mod = 1.3
+                            straight_mod = 1.6
 
                         add_cost = 0
 
@@ -583,8 +594,8 @@ class Graph:
                 if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
                     cost_so_far[next_key] = new_cost
                     # log('cost_so_far: {}'.format(new_cost))
-                    distance_cost = sum(distance_costs[current_waypoint:]) * 1.6
-                    target_cost = waypoints[current_waypoint].calculate_distance_between(next) * 1.6
+                    distance_cost = sum(distance_costs[current_waypoint:]) * 1.7
+                    target_cost = waypoints[current_waypoint].calculate_distance_between(next) * 1.7
                     priority = new_cost + target_cost + distance_cost
                     # log('priority: {}'.format(priority))
 
@@ -594,6 +605,9 @@ class Graph:
                     # log('frontier.put({}, ({}, {}))'.format(priority, next.x, next.y))
                     came_from[next_key] = current
                     # log('came_from: {} {} = {}'.format(next.x, next.y, current))
+
+        if len(solutions) == 0:
+            solutions = ok_solutions
 
         lowest_cost = 100000
         final_point = None
@@ -1002,6 +1016,37 @@ class Ship(Entity):
 
         return self.navigate(nav)
 
+    def guaranteed_mine_hit(self, ships):
+        mine_position = self.get_neighbor(self.graph.map.abs_rotation(self.rotation+3)).get_neighbor(self.graph.map.abs_rotation(self.rotation+3))
+
+        for ship in ships.values():
+            if ship.calculate_distance_between(mine_position) > 5:
+                continue
+
+            rotation_point = ship
+
+            speed_1 = ship.get_neighbor(self.graph.map.abs_rotation(ship.rotation)).get_neighbor(self.graph.map.abs_rotation(ship.rotation))
+            if mine_position.x == speed_1.x and mine_position.y == speed_1.y:
+                # log('Got with speed_1')
+                return True
+
+            if ship.speed > 0:
+                rotation_point = ship.get_neighbor(self.graph.map.abs_rotation(ship.rotation))
+                speed_2 = speed_1.get_neighbor(self.graph.map.abs_rotation(ship.rotation))
+                if mine_position.x == speed_2.x and mine_position.y == speed_2.y:
+                    # log('Got with speed_2')
+                    return True
+
+                if ship.speed > 1:
+                    rotation_point = speed_1
+
+            for rotation in [-1, 1]:
+                bow_stern = rotation_point.get_neighbor(ship.graph.map.abs_rotation(ship.rotation + rotation))
+                if mine_position.x == bow_stern.x and mine_position.y == bow_stern.y:
+                    # log('Got with bow_rot')
+                    return True
+        return False
+
     def determine_move(self, moves):
         #log(str(moves))
         action = None
@@ -1192,12 +1237,23 @@ class AI:
                         ship.no_action()
 
                 if ship.navigate_action == 'WAIT' or ship.navigate_action is None or ship.action is None:
-                    if ship.can_fire():
+                    lay_mine=MAYBE
+                    if ship.can_lay_mine():
+                        if not ship.guaranteed_mine_hit(self.game.my_ships):
+                            if not ship.guaranteed_mine_hit(self.game.enemy_ships):
+                                log('Guaranteed Enemy')
+                                lay_mine = YES
+                        else:
+                            log('Guaranteed Me')
+                            lay_mine = NO
+
+                    if ship.can_fire() and lay_mine != YES:
                         log('ship ({}) firing'.format(id))
                         result = ship.fire(closest_ship)
                         if result:
                             continue
-                    if ship.can_lay_mine():
+
+                    if lay_mine != NO:
                         log('ship ({}) laying mine'.format(id))
                         ship.lay_mine()
                     else:

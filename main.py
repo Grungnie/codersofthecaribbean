@@ -33,6 +33,7 @@ MAYBE = 2
 def log(info):
     print(info, file=sys.stderr, flush=True)
 
+
 class Timer:
     def __init__(self):
         self.start = time.time()
@@ -43,6 +44,7 @@ class Timer:
         self.start = time.time()
 
 timer = Timer()
+
 
 class Game:
     def __init__(self):
@@ -93,59 +95,26 @@ class Game:
 
             log(json.dumps(self.inputs))
 
-    def update_map(self, load='3'):
-        #log('Getting inputs')
-
+    def update_map(self, load=False):
         self.get_all_inputs(load=load)
-        #log('Got all inputs')
         timer.print('inputs')
 
         self.clear_last_turn()
-        #log('Cleared last turn')
         timer.print('clear')
 
         self.my_ship_count = int(self.inputs['my_ship_count'])  # the number of remaining ships
         self.entity_count = int(self.inputs['entity_count'])  # the number of entities (e.g. ships, mines or cannonballs)
 
         self.get_entities()
-        #log('Got Entities')
-
         timer.print('entities')
 
         self.graph.refresh()
-        #log('Graph refreshed')
-
         timer.print('graph')
 
         self.map.update(self)
-        #log('Map updated')
-
         timer.print('update')
 
-        self.remove_entities_from_graph()
-        #log('Entities removed from graph')
-
-        timer.print('remove')
-
-    def remove_entities_from_graph(self):
-        # for mine in self.mines:
-        #     self.graph.remove_node(mine.x, mine.y, source=MINE)
-        # timer.print('mine')
-        # for id, ship in self.enemy_ships.items():
-        #     self.graph.remove_ship_from_graph(ship)
-        # timer.print('ship')
-        # for cannonball in self.cannonballs:
-        #     self.graph.remove_node(cannonball.x, cannonball.y, source=CANNONBALL, timestep=cannonball.impact)
-        # timer.print('cannonball')
-
-        deque(map(lambda mine: self.graph.remove_node(mine.x, mine.y, source=MINE), self.mines))
-        timer.print('mine')
-        deque(map(lambda ship: self.graph.remove_ship_from_graph(ship), self.enemy_ships.values()))
-        timer.print('ship')
-        deque(map(lambda cannonball: self.graph.remove_node(cannonball.x, cannonball.y, source=CANNONBALL, timestep=cannonball.impact), self.cannonballs))
-        timer.print('cannonball')
-        self.graph.remove_ship_radii(self.my_ships, self.enemy_ships)
-        timer.print('ship radii')
+        self.graph.remove_nodes(self)
 
     def print_map(self):
         for i, row in enumerate(self.map.grid):
@@ -214,6 +183,7 @@ class Game:
             if ship_id not in seen_entities:
                 del self.enemy_ships[ship_id]
 
+
 class Graph:
     def __init__(self, map):
         self.x_max = map.x
@@ -221,13 +191,23 @@ class Graph:
         self.map = map
         self.graph = {}
 
-        self.mine_nodes = set()
-        self.high_ship_nodes = set()
-        self.low_ship_nodes = set()
-        self.ship_radius_1 = set()
-        self.ship_radius_2 = set()
-        self.cannonball_nodes = [set() for _ in range(15)]
-        self.cannonball_soft_nodes = [set() for _ in range(15)]
+        self.full_cannonball_nodes = [set() for _ in range(15)]
+        self.partial_cannonball_nodes = [set() for _ in range(15)]
+
+        self.full_mine_nodes = set()
+        self.partial_mine_nodes = set()
+
+        self.full_ship_nodes = set()
+        self.partial_ship_nodes = set()
+
+        self.full_mine_radii = set()
+        self.partial_mine_radii = set()
+
+        self.full_ship_radii_1 = set()
+        self.partial_ship_radii_1 = set()
+
+        self.full_ship_radii_2 = set()
+        self.partial_ship_radii_2 = set()
 
         # For each combination of x, y, direction and speed find neighbours
         for col, row_list in enumerate(self.map.grid):
@@ -237,15 +217,24 @@ class Graph:
                         self.graph[self.encode_node_key(row, col, rot, spd)] = self.find_neighbours(row, col, rot, spd)
 
     def refresh(self):
-        self.mine_nodes.clear()
-        self.high_ship_nodes.clear()
-        self.low_ship_nodes.clear()
-        self.ship_radius_1.clear()
-        self.ship_radius_2.clear()
+        self.full_mine_nodes.clear()
+        self.partial_mine_nodes.clear()
+
+        self.full_ship_nodes.clear()
+        self.partial_ship_nodes.clear()
+
+        self.full_mine_radii.clear()
+        self.partial_mine_radii.clear()
+
+        self.full_ship_radii_1.clear()
+        self.partial_ship_radii_1.clear()
+
+        self.full_ship_radii_2.clear()
+        self.partial_ship_radii_2.clear()
 
         for x in range(15):
-            self.cannonball_nodes[x].clear()
-            self.cannonball_soft_nodes[x].clear()
+            self.full_cannonball_nodes[x].clear()
+            self.partial_cannonball_nodes[x].clear()
 
     def find_neighbours(self, row, col, rot, spd):
         if spd == 0:
@@ -332,69 +321,155 @@ class Graph:
         s = int( key - w*1000000 - x*10000 - y*100 - r*10)
         return w, x, y, r, s
 
-    def remove_node(self, row, col, dir=None, spd=None, ship=True, source=None, timestep=None):
-        dir = range(6) if dir is None else dir
-        spd = range(3) if spd is None else spd
+    @staticmethod
+    def get_full_key(key):
+        return int(key/100)*100
 
-        # remove the node and all paths to the node from the index
-        deque(map(self._remove_node, [(source, timestep, row, col, _dir, _spd) for _dir in dir for _spd in spd]))
+    def remove_nodes(self, game):
+        # Cannonball - all
+        deque(map(lambda cannonball: self.remove_cannonball_node(cannonball.x, cannonball.y, cannonball.impact), game.cannonballs))
+        deque(map(lambda cannonball: self.remove_partial_cannonball_nodes(cannonball.x, cannonball.y, cannonball.impact), game.cannonballs))
+        timer.print('cannonballs removed')
 
-        # If we are removing the node for a ship we need to remove all possible ship positions
-        # Every neighbour with a angle pointing directly at the point or directly away from the point
-        if ship:
-            point = Position(row, col)
-            deque(map(self.remove_ship_nodes, [(i, point, timestep, source) for i in range(6)]))
+        # Mine - all
+        deque(map(lambda mines: self.remove_mine_node(mines.x, mines.y), game.mines))
+        deque(map(lambda mines: self.remove_partial_mine_node(mines.x, mines.y), game.mines))
+        timer.print('mines removed')
 
+        # Ship - Only if not in mine
+        ship_nodes = [self.get_ship_nodes(ship) for ship in game.enemy_ships.values()]
+        deque(map(lambda node: self.remove_ship_node(node[0], node[1]), [x for y in ship_nodes for x in y]))
+        deque(map(lambda node: self.remove_partial_ship_node(node[0], node[1]), [x for y in ship_nodes for x in y]))
+        timer.print('ships removed')
 
-    def _remove_node(self, args):
-        if args[0] == MINE:
-            self.mine_nodes.add(self.encode_node_key(args[2], args[3], args[4], args[5]))
-        elif args[0] == SHIP_RADIUS_1:
-            self.ship_radius_1.add(self.encode_node_key(args[2], args[3], args[4], args[5]))
-        elif args[0] == SHIP_RADIUS_2:
-            self.ship_radius_2.add(self.encode_node_key(args[2], args[3], args[4], args[5]))
-        elif args[0] == HIGH_SHIP:
-            self.high_ship_nodes.add(self.encode_node_key(args[2], args[3], args[4], args[5]))
-        elif args[0] == LOW_SHIP:
-            self.low_ship_nodes.add(self.encode_node_key(args[2], args[3], args[4], args[5]))
-        elif args[0] == CANNONBALL:
-            self.cannonball_nodes[args[1]].add(self.encode_node_key(args[2], args[3], args[4], args[5]))
-            # if 0 <= row < self.map.y and 0 <= col < self.map.x and self.map.grid[row][col] == MINE:
-            # log('Adding soft cannonball')
-            # for neighbour in self.map.neighbours(Position(row, col)):
-            #    self.remove_node(neighbour.x, neighbour.y, source=SOFT_CANNONBALL, timestep=timestep)
-        elif args[0] == SOFT_CANNONBALL:
-            self.cannonball_soft_nodes[args[1]].add(self.encode_node_key(args[2], args[3], args[4], args[5]))
+        # Ship Radii 1 - Only if not in mine or ship (start using same decay)
+        remove_radii = self.get_remove_radii(game)
+        nodes = [z for y in remove_radii for x in y for z in x[0]]
+        deque(map(lambda node: self.remove_full_ship_radii_1(node[0], node[1]), nodes))
+        deque(map(lambda node: self.remove_partial_ship_radii_1(node[0], node[1]), nodes))
+        timer.print('ship radii 1 removed')
+
+        # This appears to decrease the result
+        # Mine Radii 1 - only if not in mine
+        # mine_radii = self.get_mine_radii(game.mines)
+        # deque(map(lambda node: self.remove_mine_radii(node.x, node.y), mine_radii))
+        # deque(map(lambda node: self.remove_partial_mine_radii(node.x, node.y), mine_radii))
+        # timer.print('mine radii removed')
+
+        # This appears to decrease the result
+        # Ship Radii 2 - Only if not in mine or ship (start using same decay)
+        nodes = [z for y in remove_radii for x in y for z in x[1]]
+        deque(map(lambda node: self.remove_full_ship_radii_2(node[0], node[1]), nodes))
+        deque(map(lambda node: self.remove_partial_ship_radii_2(node[0], node[1]), nodes))
+        timer.print('ship radii 2 removed')
+
+    def get_mine_radii(self, mines):
+        return [mine.get_neighbor(i) for mine in mines for i in range(6)]
+
+    def get_remove_radii(self, game):
+        remove_radii = []
+        for x in [(ship, game.my_ships.values()) for ship in game.my_ships.values()]:
+            points = self.remove_ship_radius(x)
+            if points is not None:
+                remove_radii.append(points)
+
+        # for x in [(ship, game.my_ships.values()) for ship in game.enemy_ships.values()]:
+        #     points = self.remove_ship_radius(x)
+        #     if points is not None:
+        #         remove_radii.append(points)
+        return remove_radii
+
+    def get_hex_cost(self, key, t):
+        full_key = int(key / 100)*100
+
+        # Check for cannonball cost
+        for test_step in [t-x for x in range(-2,3) if 14 >= t-x >= 0]:
+            if full_key in self.full_cannonball_nodes[test_step] or key in self.partial_cannonball_nodes[test_step]:
+                return 80
+
+        if full_key in self.full_mine_nodes or key in self.partial_mine_nodes:
+            return 60
+
+        potential_cost = 0
+        if full_key in self.full_mine_radii or key in self.partial_mine_radii:
+            potential_cost = 2
+
+        if full_key in self.full_ship_nodes or key in self.partial_ship_nodes:
+            cost = 40 / (1+t**2)
+            return cost if cost > potential_cost else potential_cost
+        elif full_key in self.full_ship_radii_1 or key in self.partial_ship_radii_1:
+            cost = 20 / (1+t**2)
+            return cost if cost > potential_cost else potential_cost
+        elif full_key in self.full_ship_radii_2 or key in self.partial_ship_radii_2:
+            cost = 10 / (1+t**2)
+            return cost if cost > potential_cost else potential_cost
         else:
-            raise (Exception('Invalid type'))
+            return potential_cost
 
-    def remove_ship_nodes(self, args):
-        neighbour = args[1].get_neighbor(args[0])
-        self.remove_node(neighbour.x, neighbour.y, dir=[args[0], self.map.abs_rotation(args[0] + 3)], ship=False, source=args[3],
-                         timestep=args[2])
+    def remove_cannonball_node(self, x, y, t):
+        self.full_cannonball_nodes[t].add(self.encode_node_key(x, y, 0, 0))
 
-        far_neighbour = neighbour.get_neighbor(args[0])
-        self.remove_node(far_neighbour.x, far_neighbour.y, dir=[self.map.abs_rotation(args[0] + 3)], spd=[1, 2], ship=False,
-                         source=args[3], timestep=args[2])
+    def remove_partial_cannonball_nodes(self, x, y, t):
+        deque(map(lambda r: self.partial_cannonball_nodes[t].update(self.node_partials(x, y, r)), range(6)))
 
-        further_neighbour = far_neighbour.get_neighbor(args[0])
-        self.remove_node(further_neighbour.x, further_neighbour.y, dir=[self.map.abs_rotation(args[0] + 3)], spd=[2],
-                         ship=False, source=args[3], timestep=args[2])
+    def remove_mine_node(self, x, y):
+        self.full_mine_nodes.add(self.encode_node_key(x, y, 0, 0))
 
-    def remove_ship_from_graph(self, ship, rem_forward=True, rem_port=True, rem_starboard=True):
+    def remove_partial_mine_node(self, x, y):
+        deque(map(lambda r: self.partial_mine_nodes.update(self.node_partials(x, y, r,
+                    full_ignore=[self.full_mine_nodes])
+                ), range(6)))
+
+    def remove_ship_node(self, x, y):
+        key = self.encode_node_key(x, y, 0, 0)
+        if key not in self.full_mine_nodes:
+            self.full_ship_nodes.add(key)
+
+    def remove_partial_ship_node(self, x, y):
+        deque(map(lambda r: self.partial_ship_nodes.update(self.node_partials(x, y, r,
+                    full_ignore=[self.full_mine_nodes, self.full_ship_nodes],
+                    partial_ignore=[self.partial_mine_nodes, self.partial_ship_nodes])
+                ), range(6)))
+
+    def remove_mine_radii(self, x, y):
+        key = self.encode_node_key(x, y, 0, 0)
+        if key not in self.full_mine_nodes:
+            self.full_mine_radii.add(key)
+
+    def remove_partial_mine_radii(self, x, y):
+        deque(map(lambda r: self.partial_mine_radii.update(self.node_partials(x, y, r,
+                    full_ignore=[self.full_mine_nodes],
+                    partial_ignore=[self.partial_mine_nodes])
+                ), range(6)))
+
+    def remove_partial_ship_radii_1(self, x, y):
+        deque(map(lambda r: self.partial_ship_radii_1.update(self.node_partials(x, y, r,
+                    full_ignore=[self.full_mine_nodes, self.full_ship_nodes],
+                    partial_ignore=[self.partial_mine_nodes, self.partial_ship_nodes])
+                ), range(6)))
+
+    def remove_partial_ship_radii_2(self, x, y):
+        deque(map(lambda r: self.partial_ship_radii_2.update(self.node_partials(x, y, r,
+                    full_ignore=[self.full_mine_nodes, self.full_ship_nodes, self.full_ship_radii_1],
+                    partial_ignore=[self.partial_mine_nodes, self.partial_ship_nodes, self.partial_ship_radii_1, self.partial_mine_radii])
+                ), range(6)))
+
+    def get_ship_nodes(self, ship, rem_forward=True, rem_port=True, rem_starboard=True):
+        nodes = []
+
         bow = ship.get_neighbor(ship.rotation)
         stern = ship.get_neighbor(self.map.abs_rotation(ship.rotation + 3))
 
-        self.remove_node(ship.x, ship.y, source=HIGH_SHIP)
-        self.remove_node(bow.x, bow.y, source=HIGH_SHIP)
-        self.remove_node(stern.x, stern.y, source=LOW_SHIP)
+        nodes.append((ship.x, ship.y))
+        nodes.append((bow.x, bow.y))
+        nodes.append((stern.x, stern.y))
 
         forward_move = bow.get_neighbor(ship.rotation)
         if rem_forward:
-            self.remove_node(forward_move.x, forward_move.y, source=HIGH_SHIP)
+            nodes.append((forward_move.x, forward_move.y))
             if ship.speed == 2:
                 fast_move = forward_move.get_neighbor(ship.rotation)
-                self.remove_node(fast_move.x, fast_move.y, source=LOW_SHIP)
+                nodes.append((fast_move.x, fast_move.y))
 
         if ship.speed == 0:
             rotation_point = ship
@@ -405,19 +480,74 @@ class Graph:
 
         if rem_port:
             port_bow = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation + 1))
-            self.remove_node(port_bow.x, port_bow.y, source=LOW_SHIP)
+            nodes.append((port_bow.x, port_bow.y))
             port_stern = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation + 4))
-            self.remove_node(port_stern.x, port_stern.y, source=LOW_SHIP)
+            nodes.append((port_stern.x, port_stern.y))
 
         if rem_starboard:
             port_bow = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation - 1))
-            self.remove_node(port_bow.x, port_bow.y, source=LOW_SHIP)
+            nodes.append((port_bow.x, port_bow.y))
             port_stern = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation - 4))
-            self.remove_node(port_stern.x, port_stern.y, source=LOW_SHIP)
+            nodes.append((port_stern.x, port_stern.y))
 
-    def remove_ship_radii(self, my_ships, enemy_ships):
-        deque(map(self.remove_ship_radius, [(ship, my_ships.values()) for ship in my_ships.values()]))
-        #deque(map(self.remove_ship_radius, [(ship, my_ships.values()) for ship in enemy_ships.values()]))
+        return nodes
+
+    def node_partials(self, x, y, r, full_ignore=None, partial_ignore=None):
+        neighbour = Position(x,y).get_neighbor(r)
+        far_neighbour = neighbour.get_neighbor(r)
+        further_neighbour = far_neighbour.get_neighbor(r)
+
+        partial_keys = [
+            self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 0),
+            self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 1),
+            self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 2),
+            self.encode_node_key(neighbour.x, neighbour.y, r, 0),
+            self.encode_node_key(neighbour.x, neighbour.y, r, 1),
+            self.encode_node_key(neighbour.x, neighbour.y, r, 2),
+
+            self.encode_node_key(far_neighbour.x, far_neighbour.y, self.map.abs_rotation(r+3), 1),
+            self.encode_node_key(far_neighbour.x, far_neighbour.y, self.map.abs_rotation(r+3), 2),
+
+            self.encode_node_key(further_neighbour.x, further_neighbour.y, self.map.abs_rotation(r+3), 2)
+        ]
+
+        keys_1 = []
+        if full_ignore is not None:
+            for node_key in partial_keys:
+                found = False
+                for key_set in full_ignore:
+                    if node_key in key_set:
+                        found = True
+                        break
+                if not found:
+                    keys_1.append(node_key)
+        else:
+            keys_1 = partial_keys
+
+        keys_2 = []
+        if partial_ignore is not None:
+            for node_key in keys_1:
+                found = False
+                for key_set in partial_ignore:
+                    if node_key in key_set:
+                        found = True
+                        break
+                if not found:
+                    keys_2.append(node_key)
+        else:
+            keys_2 = keys_1
+
+        return keys_2
+
+    def remove_full_ship_radii_1(self, x, y):
+        key = self.encode_node_key(x, y, 0, 0)
+        if key not in self.full_ship_nodes and key not in self.full_mine_nodes:
+            self.full_ship_radii_1.add(key)
+
+    def remove_full_ship_radii_2(self, x, y):
+            key = self.encode_node_key(x, y, 0, 0)
+            if key not in self.full_mine_nodes and key not in self.full_ship_nodes and key not in self.full_ship_radii_1 and key not in self.full_mine_radii:
+                self.full_ship_radii_2.add(key)
 
     def remove_ship_radius(self, args):
         ship_center = args[0]
@@ -431,18 +561,23 @@ class Graph:
                     remove = True
 
         if remove:
-            deque(map(self.remove_1_ship_radius, [(i, ship_center) for i in range(6)]))
+            return [self.get_ship_radius(x) for x in [(i, ship_center) for i in range(6)]]
+        else:
+            return None
 
-    def remove_1_ship_radius(self, args):
+    def get_ship_radius(self, args):
         neighbour_position = args[1].get_neighbor(args[0])
 
         if 0 <= neighbour_position.y < self.map.y and 0 <= neighbour_position.x < self.map.x:
-            self.remove_node(neighbour_position.x, neighbour_position.y, source=SHIP_RADIUS_1)
+            rad_1 = [(neighbour_position.x, neighbour_position.y)]
 
+            rad_2 = []
             for x in range(2):
-                neighbour_position = args[1].get_neighbor(self.map.abs_rotation(args[0] + x))
-                if 0 <= neighbour_position.y < self.map.y and 0 <= neighbour_position.x < self.map.x:
-                    self.remove_node(neighbour_position.x, neighbour_position.y, source=SHIP_RADIUS_2)
+                new_neighbour_position = neighbour_position.get_neighbor(self.map.abs_rotation(args[0] + x))
+                if 0 <= new_neighbour_position.y < self.map.y and 0 <= new_neighbour_position.x < self.map.x:
+                    rad_2.append((new_neighbour_position.x, new_neighbour_position.y))
+            return rad_1, rad_2
+        return [[], []]
 
     def neighbours(self, key):
         if key in self.graph:
@@ -454,7 +589,13 @@ class Graph:
         for rot in range(6):
             for spd in range(2):
                 key = self.encode_node_key(entity.x, entity.y, rot, spd)
-                if key not in self.mine_nodes and key not in self.high_ship_nodes and key not in self.cannonball_nodes:
+                full_key = self.get_full_key(key)
+                if full_key not in self.full_mine_nodes and \
+                    full_key not in self.full_ship_nodes and \
+                    full_key not in self.full_cannonball_nodes and \
+                    key not in self.partial_mine_nodes and \
+                    key not in self.partial_ship_nodes and \
+                    key not in self.partial_cannonball_nodes:
                     return True
         return False
 
@@ -509,7 +650,6 @@ class Graph:
     def find_path(self, ship, entity, waypoints=None):
         waypoints = [entity] if waypoints is None else [entity] + waypoints
 
-        start_time = time.time()
         if not self.in_grid(entity):
             return False
 
@@ -525,16 +665,8 @@ class Graph:
 
         distance_costs = [waypoints[x].calculate_distance_between(waypoints[x+1]) for x in range(len(waypoints)-1)] + [0]
 
-        final_point = None
-
-        # If the node the ship is currently on has been removed we need to replace it.
-        # if (ship.x, ship.y, ship.rotation, ship.speed) not in self.graph:
-        #     self.graph[(ship.x, ship.y, ship.rotation, ship.speed)] = self.find_neighbours(ship.x, ship.y, ship.rotation, ship.speed)
-
         points_checked = 0
         while len(frontier) > 0:
-            #log('time 1: {:0.2f}'.format((time.time() - start_time)*10000, 2))
-            #start_time = time.time()
             priority, current_timestep = heapq.heappop(frontier)
             current = current_timestep[0]
             timestep = current_timestep[1]
@@ -547,8 +679,6 @@ class Graph:
 
             current_waypoint, cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
             current_no_w = current - (current_waypoint*1000000)
-
-            #log('{} {} {} {} {}'.format(current_waypoint, cur_x, cur_y, cur_r, cur_s))
 
             # Check if we have reached the last waypoint
             if came_from[current] is not None:
@@ -582,81 +712,35 @@ class Graph:
                         ok_solutions.append(current_point)
                     current_waypoint += 1
 
-            #log('time 2: {:0.2f}'.format((time.time() - start_time)*10000, 2))
-
             for next in self.neighbours(current_no_w):
-                #start_time = time.time()
-                # log('next: ({},{}) {} {}'.format(next.x, next.y, next.rotation, next.speed))
                 next_key = self.encode_node_key(next.x, next.y, next.rotation, next.speed, current_waypoint)
                 next_key_no_w = self.encode_node_key(next.x, next.y, next.rotation, next.speed)
 
-
                 straight_mod, speed_mod = 1, 1
+                hex_cost = self.get_hex_cost(next_key_no_w, timestep)
 
-                #log('time 3: {:0.2f}'.format((time.time() - start_time)*10000, 4))
-                #start_time = time.time()
-
-                time_cost = False
-                for test_step in [timestep-x for x in range(-2,3) if 14 >= timestep-x >= 0 ]:
-                    if next_key_no_w in self.cannonball_nodes[test_step]:
-                        time_cost = True
-                        break
-
-                #log('time 4: {:0.2f}'.format((time.time() - start_time)*10000, 4))
-                #start_time = time.time()
-
-                if time_cost:
-                    add_cost = 80
-                elif next_key_no_w in self.mine_nodes:
-                    add_cost = 60       # This is a little more than a full back out of a hole and moving round
-                elif next_key_no_w in self.high_ship_nodes:
-                    add_cost = 40 / (1 + timestep**2)
-                elif next_key_no_w in self.ship_radius_1:
-                    add_cost = 20 / (1 + timestep ** 2)
-                elif next_key_no_w in self.ship_radius_2:
-                    add_cost = 10 / (1 + timestep ** 2)
+                if hex_cost > 0:
+                    add_cost = hex_cost
                 else:
-                    soft_time_cost = False
-                    for test_step in [timestep - x for x in range(-2, 3) if 14 >= timestep - x >= 0]:
-                        if next_key_no_w in self.cannonball_soft_nodes[test_step]:
-                            soft_time_cost = True
-                            break
-
-                    if soft_time_cost:
-                        add_cost = 2
+                    # Speed modifier - we prefer moving over not moving
+                    speed_mod = 1.2 if cur_s > 0 else 1
+                    # Can we make a non-movement action?
+                    if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
+                        straight_mod = 1
                     else:
-                        # Speed modifier - we prefer moving over not moving
-                        speed_mod = 1.2 if cur_s > 0 else 1
-
-                        # Can we make a non-movement action?
-                        if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
-                            straight_mod = 1
-                        else:
-                            straight_mod = 1.6
-
-                        add_cost = 0
-
-                #log('time 5: {:0.2f}'.format((time.time() - start_time)*10000, 4))
-                #start_time = time.time()
+                        straight_mod = 1.6
+                    add_cost = 0
 
                 cost = (1 * speed_mod * straight_mod) + add_cost
 
                 new_cost = cost_so_far[current] + cost
-                # log('cost_so_far: {}, new_cost: {}'.format(cost_so_far[(current[0], current[1])], new_cost))
                 if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
                     cost_so_far[next_key] = new_cost
-                    # log('cost_so_far: {}'.format(new_cost))
                     distance_cost = sum(distance_costs[current_waypoint:]) * 1.7
                     target_cost = waypoints[current_waypoint].calculate_distance_between(next) * 1.7
                     priority = new_cost + target_cost + distance_cost
-                    # log('priority: {}'.format(priority))
-
-                    # log('{} {} {} {}'.format(current[0], current[1], current[2], current[3]))
-                    # log('{} {} {} {}'.format(next.x, next.y, next.rotation, next.speed))
                     heapq.heappush(frontier, (priority, (next_key, timestep+1)))
-                    # log('frontier.put({}, ({}, {}))'.format(priority, next.x, next.y))
                     came_from[next_key] = current
-                    # log('came_from: {} {} = {}'.format(next.x, next.y, current))
 
         if len(solutions) == 0:
             solutions = ok_solutions
@@ -950,7 +1034,9 @@ class Ship(Entity):
 
         #log('FIRE : estimated_time:{} : target_point:({},{}) : distance:{}'.format(fire_time, self.fire_x, self.fire_y, distance))
 
-        self.graph.remove_ship_from_graph(self, rem_forward=rem_forward)
+        deque(map(lambda node: self.graph.remove_ship_node(node[0], node[1]),
+                  self.graph.get_ship_nodes(self, rem_forward=rem_forward)))
+
         return True
 
     def _print_fire(self):
@@ -968,7 +1054,8 @@ class Ship(Entity):
         else:
             rem_forward = False
 
-        self.graph.remove_ship_from_graph(self, rem_forward=rem_forward)
+        deque(map(lambda node: self.graph.remove_ship_node(node[0], node[1]),
+          self.graph.get_ship_nodes(self, rem_forward=rem_forward)))
 
     def _print_mine(self):
         print('MINE MINE')
@@ -982,7 +1069,8 @@ class Ship(Entity):
         else:
             rem_forward = False
 
-        self.graph.remove_ship_from_graph(self, rem_forward=rem_forward)
+        deque(map(lambda node: self.graph.remove_ship_node(node[0], node[1]),
+                  self.graph.get_ship_nodes(self, rem_forward=rem_forward)))
 
     def _print_no_action(self):
         print('WAIT WAIT')
@@ -1032,7 +1120,9 @@ class Ship(Entity):
 
     def ordered_waypoints(self, enemy_ships):
         avoid, enemy_ship = self.should_avoid(enemy_ships)
-        return sorted(range(len(self.waypoints)), key=lambda x: Position(self.waypoints[x].x, self.waypoints[x].y).calculate_distance_between(enemy_ship), reverse=avoid)
+        return sorted(range(len(self.waypoints)),
+                      key=lambda x: Position(self.waypoints[x].x, self.waypoints[x].y).calculate_distance_between(enemy_ship),
+                      reverse=avoid)
 
     def waypoint_move(self, enemy_ships):
         #log(enemy_ships)
@@ -1132,7 +1222,8 @@ class Ship(Entity):
         else:
             rem_starboard = True
 
-        self.graph.remove_ship_from_graph(self, rem_forward=rem_forward, rem_port=rem_port, rem_starboard=rem_starboard)
+        deque(map(lambda node: self.graph.remove_ship_node(node[0], node[1]),
+                  self.graph.get_ship_nodes(self, rem_forward=rem_forward, rem_port=rem_port, rem_starboard=rem_starboard)))
 
         return action
 
@@ -1188,7 +1279,6 @@ class Position(Entity):
 class AI:
     def __init__(self):
         self.game = Game()
-
         self.targeted_barrels = []
 
     def get_closest_entity(self, ship, entities, ignore=None):
@@ -1227,11 +1317,11 @@ class AI:
             barrel_distances[barrel1.id] = sorted([(barrel2, barrel1.calculate_distance_between(barrel2)) for barrel2 in barrels if barrel2.id != barrel1.id], key=lambda x: x[1])
         return barrel_distances
 
-    def run(self):
+    def run(self, load=False):
         while True:
             time_a = time.time()
 
-            self.game.update_map(load=False)
+            self.game.update_map(load=load)
 
             # Assign barrels
             taken_barrels = set()

@@ -29,6 +29,13 @@ NO = 0
 YES = 1
 MAYBE = 2
 
+# Game Vars
+CANNONBALL_COST = 200
+MINE_COST = 150
+SHIP_COST = 30
+MINE_RADII_COST = 3
+SHIP_RADII_1_COST = 30
+SHIP_RADII_2_COST = 15
 
 def log(info):
     print(info, file=sys.stderr, flush=True)
@@ -209,6 +216,9 @@ class Graph:
         self.full_ship_radii_2 = set()
         self.partial_ship_radii_2 = set()
 
+        self._node_partials = {}
+        self.compile_node_partials()
+
         # For each combination of x, y, direction and speed find neighbours
         for col, row_list in enumerate(self.map.grid):
             for row , corr_value in enumerate(row_list):
@@ -308,18 +318,19 @@ class Graph:
         return neighbours
 
     @staticmethod
-    def encode_node_key(x, y, r, s, w=0):
+    def encode_node_key(x, y, r, s, w=0, wi=0):
         # xxyyrs
-        return w*1000000 + x*10000 + y*100 + r*10 + s
+        return wi*10000000 + w*1000000 + x*10000 + y*100 + r*10 + s
 
     @staticmethod
     def decode_node_key(key):
-        w = int( key/1000000)
-        x = int((key - w*1000000)/10000)
-        y = int((key - w*1000000 - x*10000)/100)
-        r = int((key - w*1000000 - x*10000 - y*100)/10)
-        s = int( key - w*1000000 - x*10000 - y*100 - r*10)
-        return w, x, y, r, s
+        wi = int( key/10000000)
+        w = int((key - wi*10000000) /1000000)
+        x = int((key - wi*10000000 - w*1000000)/10000)
+        y = int((key - wi*10000000 - w*1000000 - x*10000)/100)
+        r = int((key - wi*10000000 - w*1000000 - x*10000 - y*100)/10)
+        s = int( key - wi*10000000 - w*1000000 - x*10000 - y*100 - r*10)
+        return wi, w, x, y, r, s
 
     @staticmethod
     def get_full_key(key):
@@ -343,25 +354,61 @@ class Graph:
         timer.print('ships removed')
 
         # Ship Radii 1 - Only if not in mine or ship (start using same decay)
-        remove_radii = self.get_remove_radii(game)
-        nodes = [z for y in remove_radii for x in y for z in x[0]]
+        future_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in game.my_ships.values() if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
+        # enemy_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in game.enemy_ships.values() if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
+        nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in future_ship_positions]
+        nodes = [y for x in nodes_2d for y in x]
         deque(map(lambda node: self.remove_full_ship_radii_1(node[0], node[1]), nodes))
         deque(map(lambda node: self.remove_partial_ship_radii_1(node[0], node[1]), nodes))
         timer.print('ship radii 1 removed')
 
         # This appears to decrease the result
         # Mine Radii 1 - only if not in mine
-        # mine_radii = self.get_mine_radii(game.mines)
-        # deque(map(lambda node: self.remove_mine_radii(node.x, node.y), mine_radii))
-        # deque(map(lambda node: self.remove_partial_mine_radii(node.x, node.y), mine_radii))
-        # timer.print('mine radii removed')
+        nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in game.mines]
+        nodes = [y for x in nodes_2d for y in x]
+        deque(map(lambda node: self.remove_mine_radii(node[0], node[1]), nodes))
+        deque(map(lambda node: self.remove_partial_mine_radii(node[0], node[1]), nodes))
+        timer.print('mine radii removed')
 
         # This appears to decrease the result
         # Ship Radii 2 - Only if not in mine or ship (start using same decay)
-        nodes = [z for y in remove_radii for x in y for z in x[1]]
+        nodes_2d = [self.map.neighbours(x.x, x.y, search_range=2) for x in future_ship_positions]
+        nodes = [y for x in nodes_2d for y in x]
         deque(map(lambda node: self.remove_full_ship_radii_2(node[0], node[1]), nodes))
         deque(map(lambda node: self.remove_partial_ship_radii_2(node[0], node[1]), nodes))
         timer.print('ship radii 2 removed')
+
+    def clamp_coords_within_bounds(self, x, y):
+        if x >= self.x_max:
+            x = self.x_max-1
+            #log('mod_x_max')
+        if y >= self.y_max:
+            y = self.y_max-1
+            #log('mod_y_max')
+        if x < 0:
+            x = 0
+            #log('mod_x_min')
+        if y < 0:
+            y = 0
+            #log('mod_y_min')
+        return x, y
+
+    def clamp_position_within_bounds(self, position):
+
+        if position.x >= self.x_max:
+            position.x = self.x_max-1
+            #log('mod_x_max')
+        if position.y >= self.y_max:
+            position.y = self.y_max-1
+            #log('mod_y_max')
+        if position.x < 0:
+            position.x = 0
+            #log('mod_x_min')
+        if position.y < 0:
+            position.y = 0
+            #log('mod_y_min')
+
+        return position
 
     def get_mine_radii(self, mines):
         return [mine.get_neighbor(i) for mine in mines for i in range(6)]
@@ -385,23 +432,23 @@ class Graph:
         # Check for cannonball cost
         for test_step in [t-x for x in range(-2,3) if 14 >= t-x >= 0]:
             if full_key in self.full_cannonball_nodes[test_step] or key in self.partial_cannonball_nodes[test_step]:
-                return 80
+                return CANNONBALL_COST
 
         if full_key in self.full_mine_nodes or key in self.partial_mine_nodes:
-            return 60
+            return MINE_COST
 
         potential_cost = 0
         if full_key in self.full_mine_radii or key in self.partial_mine_radii:
-            potential_cost = 2
+            potential_cost = MINE_RADII_COST
 
         if full_key in self.full_ship_nodes or key in self.partial_ship_nodes:
-            cost = 40 / (1+t**2)
+            cost = SHIP_COST / (1+t**2)
             return cost if cost > potential_cost else potential_cost
         elif full_key in self.full_ship_radii_1 or key in self.partial_ship_radii_1:
-            cost = 20 / (1+t**2)
+            cost = SHIP_RADII_1_COST / (1+t**2)
             return cost if cost > potential_cost else potential_cost
         elif full_key in self.full_ship_radii_2 or key in self.partial_ship_radii_2:
-            cost = 10 / (1+t**2)
+            cost = SHIP_RADII_2_COST / (1+t**2)
             return cost if cost > potential_cost else potential_cost
         else:
             return potential_cost
@@ -490,26 +537,34 @@ class Graph:
             port_stern = rotation_point.get_neighbor(self.map.abs_rotation(ship.rotation - 4))
             nodes.append((port_stern.x, port_stern.y))
 
-        return nodes
+        return [node for node in nodes if 0 <= node[0] < self.x_max and 0 <= node[1] < self.y_max]
+
+    def compile_node_partials(self):
+        for x in range(self.x_max):
+            for y in range(self.y_max):
+                for r in range(6):
+                    key = self.encode_node_key(x, y, r, 0)
+
+                    neighbour = Position(x,y).get_neighbor(r)
+                    far_neighbour = neighbour.get_neighbor(r)
+                    further_neighbour = far_neighbour.get_neighbor(r)
+
+                    self._node_partials[key] = [
+                        self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 0),
+                        self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 1),
+                        self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 2),
+                        self.encode_node_key(neighbour.x, neighbour.y, r, 0),
+                        self.encode_node_key(neighbour.x, neighbour.y, r, 1),
+                        self.encode_node_key(neighbour.x, neighbour.y, r, 2),
+
+                        self.encode_node_key(far_neighbour.x, far_neighbour.y, self.map.abs_rotation(r+3), 1),
+                        self.encode_node_key(far_neighbour.x, far_neighbour.y, self.map.abs_rotation(r+3), 2),
+
+                        self.encode_node_key(further_neighbour.x, further_neighbour.y, self.map.abs_rotation(r+3), 2)
+                    ]
 
     def node_partials(self, x, y, r, full_ignore=None, partial_ignore=None):
-        neighbour = Position(x,y).get_neighbor(r)
-        far_neighbour = neighbour.get_neighbor(r)
-        further_neighbour = far_neighbour.get_neighbor(r)
-
-        partial_keys = [
-            self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 0),
-            self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 1),
-            self.encode_node_key(neighbour.x, neighbour.y, self.map.abs_rotation(r+3), 2),
-            self.encode_node_key(neighbour.x, neighbour.y, r, 0),
-            self.encode_node_key(neighbour.x, neighbour.y, r, 1),
-            self.encode_node_key(neighbour.x, neighbour.y, r, 2),
-
-            self.encode_node_key(far_neighbour.x, far_neighbour.y, self.map.abs_rotation(r+3), 1),
-            self.encode_node_key(far_neighbour.x, far_neighbour.y, self.map.abs_rotation(r+3), 2),
-
-            self.encode_node_key(further_neighbour.x, further_neighbour.y, self.map.abs_rotation(r+3), 2)
-        ]
+        partial_keys = self._node_partials[self.encode_node_key(x, y, r, 0)]
 
         keys_1 = []
         if full_ignore is not None:
@@ -549,35 +604,18 @@ class Graph:
             if key not in self.full_mine_nodes and key not in self.full_ship_nodes and key not in self.full_ship_radii_1 and key not in self.full_mine_radii:
                 self.full_ship_radii_2.add(key)
 
-    def remove_ship_radius(self, args):
-        ship_center = args[0]
-        for _ in range(args[0].speed):
-            ship_center = ship_center.get_neighbor(args[0].rotation)
+    def future_ship_position(self, ship):
+        ship_center = ship
+        for _ in range(ship.speed):
+            ship_center = ship_center.get_neighbor(ship.rotation)
+        return ship_center
 
-        remove = False
-        for my_ship in args[1]:
-            if my_ship.id != args[0].id:
-                if ship_center.calculate_distance_between(my_ship) <= 5:
-                    remove = True
-
-        if remove:
-            return [self.get_ship_radius(x) for x in [(i, ship_center) for i in range(6)]]
-        else:
-            return None
-
-    def get_ship_radius(self, args):
-        neighbour_position = args[1].get_neighbor(args[0])
-
-        if 0 <= neighbour_position.y < self.map.y and 0 <= neighbour_position.x < self.map.x:
-            rad_1 = [(neighbour_position.x, neighbour_position.y)]
-
-            rad_2 = []
-            for x in range(2):
-                new_neighbour_position = neighbour_position.get_neighbor(self.map.abs_rotation(args[0] + x))
-                if 0 <= new_neighbour_position.y < self.map.y and 0 <= new_neighbour_position.x < self.map.x:
-                    rad_2.append((new_neighbour_position.x, new_neighbour_position.y))
-            return rad_1, rad_2
-        return [[], []]
+    def check_distance_to_entities(self, ship, entities, distance):
+        for my_ship in entities:
+            if my_ship.id != ship.id:
+                if ship.calculate_distance_between(my_ship) <= distance:
+                    return True
+        return False
 
     def neighbours(self, key):
         if key in self.graph:
@@ -601,8 +639,9 @@ class Graph:
 
     def find_closest(self, point):
         available = []
-        for x in range(1, 10):
-            for neighbour in self.map.neighbours(point, search_range=x):
+        for x in range(1, 3):
+            for neighbour in self.map.neighbours(point.x, point.y, search_range=x):
+                neighbour = Position(neighbour[0], neighbour[1])
                 if self.in_grid(neighbour):
                     count = 0
                     for speed in range(3):
@@ -677,28 +716,28 @@ class Graph:
                 if points_checked % 150 == 0:
                     return False
 
-            current_waypoint, cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
-            current_no_w = current - (current_waypoint*1000000)
+            wait, current_waypoint, cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
+            current_no_w = current - (current_waypoint*1000000 + wait*10000000)
 
             # Check if we have reached the last waypoint
             if came_from[current] is not None:
-                pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
+                pre_wi, pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
                 final_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), Position(pre_x, pre_y, pre_r, pre_s), waypoints[-1])
                 if final_point:
-                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
+                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
                     solutions.append(final_point)
                     if len(solutions) > 3:
                         break
             else:
                 if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
-                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
+                    final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
                     solutions.append(final_point)
                     if len(solutions) > 3:
                         break
 
             # Check if we have reached the next waypoint
             if came_from[current] is not None and current_waypoint < (len(waypoints)-1):
-                pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
+                pre_wi, pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
                 current_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s),
                                                   Position(pre_x, pre_y, pre_r, pre_s), waypoints[current_waypoint])
                 if current_waypoint == 0:
@@ -708,12 +747,18 @@ class Graph:
             elif current_waypoint < (len(waypoints)-1):
                 if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
                     if current_waypoint == 0:
-                        current_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint)
+                        current_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
                         ok_solutions.append(current_point)
                     current_waypoint += 1
 
             for next in self.neighbours(current_no_w):
-                next_key = self.encode_node_key(next.x, next.y, next.rotation, next.speed, current_waypoint)
+                # It is waiting
+                if next.x == cur_x and next.y == cur_y and next.rotation == cur_r and next.speed == cur_s:
+                    next_wait = wait + 1
+                else:
+                    next_wait = wait
+
+                next_key = self.encode_node_key(next.x, next.y, next.rotation, next.speed, current_waypoint, next_wait)
                 next_key_no_w = self.encode_node_key(next.x, next.y, next.rotation, next.speed)
 
                 straight_mod, speed_mod = 1, 1
@@ -769,7 +814,7 @@ class Graph:
                 break
             else:
                 key = came_from[current_key]
-                w, x, y, r, s = self.decode_node_key(key)
+                wi, w, x, y, r, s = self.decode_node_key(key)
                 current_point = (x, y, r, s)
                 path.append(current_point)
                 current_key = key
@@ -785,11 +830,16 @@ class Map:
     def __init__(self, x, y):
         self.x = x
         self.y = y
+
         self.grid = [[0 for _ in range(x)] for _ in range(y)]
+
+        self._neighbours = {}
+        self._far_neighbours = {}
+
+        self.compile_neighbours()
 
     def update(self, game):
         self.grid = [[0 for _ in range(self.x)] for _ in range(self.y)]
-
 
         self.add_ships(game.my_ships)
         self.add_ships(game.enemy_ships, enemy=True)
@@ -826,21 +876,33 @@ class Map:
             # if not self.out_of_range(move):
             #     self.grid[move.y][move.x] = ship_number
 
-    def neighbours(self, position, safe=True, search_range=1):
-        position_neighbours = []
-        for i in range(6):
-            neighbour_position = position.get_neighbor(i)
-            for _ in range(search_range-1):
-                neighbour_position = neighbour_position.get_neighbor(i)
-            if safe:
-                if 0 <= neighbour_position.y < self.y and 0 <= neighbour_position.x < self.x:
-                    if self.grid[neighbour_position.y][neighbour_position.x] != MINE or \
-                                    self.grid[neighbour_position.y][neighbour_position.x] != CANNONBALL:
-                        position_neighbours.append(neighbour_position.get_neighbor(i))
-            else:
-                if 0 <= neighbour_position.y < self.x and 0 <= neighbour_position.x < self.x:
-                    position_neighbours.append(neighbour_position.get_neighbor(i))
-        return position_neighbours
+    def neighbours(self, x, y, safe=True, search_range=1, all=False):
+        key = x+y*self.x
+
+        if search_range == 1:
+            return self._neighbours[key]
+        elif search_range == 2 and not all:
+            return self._far_neighbours[key]
+        else:
+            return self._neighbours[key] + self._far_neighbours[key]
+
+    def compile_neighbours(self):
+        for x in range(self.x):
+            for y in range(self.y):
+                position = Position(x,y)
+                position_neighbours = []
+                position_far_neighbours = []
+                for i in range(6):
+                    neighbour_position = position.get_neighbor(i)
+                    if 0 <= neighbour_position.y < self.y and 0 <= neighbour_position.x < self.x:
+                        position_neighbours.append((neighbour_position.x, neighbour_position.y))
+                        for j in range(2):
+                            far_neighbour_position = neighbour_position.get_neighbor(i)
+                            if 0 <= far_neighbour_position.y < self.y and 0 <= far_neighbour_position.x < self.x:
+                                position_far_neighbours.append((far_neighbour_position.x, far_neighbour_position.y))
+
+                self._neighbours[x+y*self.x] = position_neighbours
+                self._far_neighbours[x+y*self.x] = position_far_neighbours
 
     @staticmethod
     def abs_rotation(rotation):
@@ -982,16 +1044,16 @@ class Ship(Entity):
 
                 #log('t: {}, estimated_location: ({},{})'.format(t, estimated_location.x, estimated_location.y))
 
-                if self.graph.x_max < estimated_location.x:
+                if estimated_location.x >= self.graph.x_max:
                     estimated_location.x = self.graph.x_max-1
                     #log('mod_x_max')
-                if self.graph.y_max < estimated_location.y:
+                if estimated_location.y >= self.graph.y_max:
                     estimated_location.y = self.graph.y_max-1
                     #log('mod_y_max')
-                if 0 > estimated_location.x:
+                if estimated_location.x < 0:
                     estimated_location.x = 0
                     #log('mod_x_min')
-                if 0 > estimated_location.y:
+                if estimated_location.y < 0:
                     estimated_location.y = 0
                     #log('mod_y_min')
 
@@ -1026,9 +1088,9 @@ class Ship(Entity):
         else:
             rem_forward = False
 
-        for neighbour in self.graph.map.neighbours(Position(self.fire_x, self.fire_y)):
-            if 0 <= neighbour.y < self.graph.map.y and 0 <= neighbour.x < self.graph.map.x and self.graph.map.grid[neighbour.y][neighbour.x] == MINE:
-                self.fire_x, self.fire_y = neighbour.x, neighbour.y
+        for neighbour in self.graph.map.neighbours(self.fire_x, self.fire_y):
+            if 0 <= neighbour[1] < self.graph.map.y and 0 <= neighbour[0] < self.graph.map.x and self.graph.map.grid[neighbour[1]][neighbour[0]] == MINE:
+                self.fire_x, self.fire_y = neighbour[0], neighbour[1]
                 #log('Firing on mine')
                 break
 
@@ -1162,31 +1224,17 @@ class Ship(Entity):
         mine_position = self.get_neighbor(self.graph.map.abs_rotation(self.rotation+3)).get_neighbor(self.graph.map.abs_rotation(self.rotation+3))
 
         for ship in ships.values():
-            if ship.calculate_distance_between(mine_position) > 5:
+            if ship.calculate_distance_between(mine_position) > 6 or ship.id == self.id:
                 continue
 
-            rotation_point = ship
+            key = self.graph.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed)
+            neighbours = self.graph.neighbours(key)
+            all_neighbours = [self.graph.neighbours(self.graph.encode_node_key(neighbour.x, neighbour.y, neighbour.rotation, neighbour.speed)) for neighbour in neighbours]
 
-            speed_1 = ship.get_neighbor(ship.graph.map.abs_rotation(ship.rotation)).get_neighbor(ship.graph.map.abs_rotation(ship.rotation))
-            if mine_position.x == speed_1.x and mine_position.y == speed_1.y:
-                # log('Got with speed_1')
-                return True
-
-            if ship.speed > 0:
-                rotation_point = ship.get_neighbor(ship.graph.map.abs_rotation(ship.rotation))
-                speed_2 = speed_1.get_neighbor(ship.graph.map.abs_rotation(ship.rotation))
-                if mine_position.x == speed_2.x and mine_position.y == speed_2.y:
-                    # log('Got with speed_2')
-                    return True
-
-                if ship.speed > 1:
-                    rotation_point = speed_1
-
-            for rotation in [-1, 1]:
-                bow_stern = rotation_point.get_neighbor(ship.graph.map.abs_rotation(ship.rotation + rotation))
-                if mine_position.x == bow_stern.x and mine_position.y == bow_stern.y:
-                    # log('Got with bow_rot')
-                    return True
+            for neighbour_set in all_neighbours:
+                for neighbour in neighbour_set:
+                    if neighbour.x == mine_position.x and neighbour.y == mine_position.y:
+                        return True
         return False
 
     def determine_move(self, moves):
@@ -1274,7 +1322,6 @@ class Position(Entity):
     def __str__(self):
         return "Entity {} at position: (x = {}, y = {})"\
             .format(self.__class__.__name__, self.x, self.y)
-
 
 class AI:
     def __init__(self):
@@ -1414,4 +1461,4 @@ class AI:
 
 if __name__ == "__main__":
     ai = AI()
-    ai.run()
+    ai.run(False)

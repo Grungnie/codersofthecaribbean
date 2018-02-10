@@ -10,6 +10,8 @@ from queue import PriorityQueue
 from collections import deque
 import heapq
 
+random.seed(12345)
+
 ME = 0
 ENEMY = 1
 
@@ -29,13 +31,29 @@ NO = 0
 YES = 1
 MAYBE = 2
 
-# Game Vars
+# Set these to control the cost of each modifier
 CANNONBALL_COST = 200
 MINE_COST = 150
-SHIP_COST = 30
-MINE_RADII_COST = 3
-SHIP_RADII_1_COST = 30
-SHIP_RADII_2_COST = 15
+SHIP_COST = 15
+MY_SHIP_COST = 15
+MINE_RADII_COST = 50
+SHIP_RADII_1_COST = 2
+SHIP_RADII_2_COST = 1
+
+SPEED_MULTI = 1.2
+STRAIGHT_MULTI = 1.6
+EDGE_MULTI = 1.4
+PLANNED_MULTI = 0.8
+
+# Set these to control the modifiers to search for
+ENABLE_MINE_RADII = False
+ENABLE_CANNONBALL_MINES = True
+ENABLE_SHIP_RADII_1 = True
+ENABLE_SHIP_RADII_2 = True
+
+# This is the minumum number of solutions before the nav function returns
+MINIMUM_SOLUTIONS = 3
+
 
 def log(info):
     print(info, file=sys.stderr, flush=True)
@@ -61,7 +79,7 @@ class Game:
         self.enemy_ships = {}
         self.cannonballs = []
         self.barrels = []
-        self.mines = []
+        self.mines = {}
         self.map = Map(23, 21)
         self.graph = Graph(self.map)
 
@@ -73,7 +91,7 @@ class Game:
         # self.enemy_ships = {}
         self.cannonballs = []
         self.barrels = []
-        self.mines = []
+        # self.mines = []
 
         self.my_ship_count = None
         self.entity_count = None
@@ -175,7 +193,12 @@ class Game:
             elif entity_type == 'CANNONBALL':
                 self.cannonballs.append(Cannonball(entity_id, x, y, arg_1, arg_2))
             elif entity_type == 'MINE':
-                self.mines.append(Mine(entity_id, x, y))
+                # Add any new mines, remove any mine within 5 distance if it is not in seen entities
+                if entity_id not in self.mines:
+                    self.mines[entity_id] = Mine(entity_id, x, y)
+                    seen_entities.append(entity_id)
+                else:
+                    seen_entities.append(entity_id)
             else:
                 log('Invalid entity type ({})'.format(entity_type))
                 raise(Exception('Invalid entity type'))
@@ -189,6 +212,21 @@ class Game:
         for ship_id in all_entities:
             if ship_id not in seen_entities:
                 del self.enemy_ships[ship_id]
+
+        remove_ids = []
+        for id, mine in self.mines.items():
+            if id not in seen_entities:
+                remove = False
+                for ship in self.my_ships.values():
+                    if ship.calculate_distance_between(mine) <= 5:
+                        remove = True
+                if remove:
+                    remove_ids.append(id)
+
+        for id in remove_ids:
+            del self.mines[id]
+
+        log('{} active mines'.format(len(self.mines)))
 
 
 class Graph:
@@ -206,6 +244,9 @@ class Graph:
 
         self.full_ship_nodes = set()
         self.partial_ship_nodes = set()
+
+        self.my_full_ship_nodes = set()
+        self.my_partial_ship_nodes = set()
 
         self.full_mine_radii = set()
         self.partial_mine_radii = set()
@@ -343,8 +384,8 @@ class Graph:
         timer.print('cannonballs removed')
 
         # Mine - all
-        deque(map(lambda mines: self.remove_mine_node(mines.x, mines.y), game.mines))
-        deque(map(lambda mines: self.remove_partial_mine_node(mines.x, mines.y), game.mines))
+        deque(map(lambda mines: self.remove_mine_node(mines.x, mines.y), game.mines.values()))
+        deque(map(lambda mines: self.remove_partial_mine_node(mines.x, mines.y), game.mines.values()))
         timer.print('mines removed')
 
         # Ship - Only if not in mine
@@ -353,30 +394,46 @@ class Graph:
         deque(map(lambda node: self.remove_partial_ship_node(node[0], node[1]), [x for y in ship_nodes for x in y]))
         timer.print('ships removed')
 
-        # Ship Radii 1 - Only if not in mine or ship (start using same decay)
-        future_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in game.my_ships.values() if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
-        # enemy_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in game.enemy_ships.values() if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
-        nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in future_ship_positions]
-        nodes = [y for x in nodes_2d for y in x]
-        deque(map(lambda node: self.remove_full_ship_radii_1(node[0], node[1]), nodes))
-        deque(map(lambda node: self.remove_partial_ship_radii_1(node[0], node[1]), nodes))
-        timer.print('ship radii 1 removed')
-
         # This appears to decrease the result
         # Mine Radii 1 - only if not in mine
-        nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in game.mines]
-        nodes = [y for x in nodes_2d for y in x]
-        deque(map(lambda node: self.remove_mine_radii(node[0], node[1]), nodes))
-        deque(map(lambda node: self.remove_partial_mine_radii(node[0], node[1]), nodes))
-        timer.print('mine radii removed')
+        if ENABLE_MINE_RADII or ENABLE_CANNONBALL_MINES:
+            if ENABLE_CANNONBALL_MINES:
+                mines = [mine for mine in game.mines.values() for cannonball in game.cannonballs if mine.x == cannonball.x and mine.y == cannonball.x]
+            else:
+                mines = game.mines.values()
+            nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in mines]
+            nodes = [y for x in nodes_2d for y in x]
+            deque(map(lambda node: self.remove_mine_radii(node[0], node[1]), nodes))
+            deque(map(lambda node: self.remove_partial_mine_radii(node[0], node[1]), nodes))
+            timer.print('mine radii removed')
+
+    def remove_ship_set(self, ships, game):
+        self.my_full_ship_nodes.clear()
+        self.my_partial_ship_nodes.clear()
+
+        ship_nodes = [self.get_ship_nodes(ship) for ship in ships]
+        deque(map(lambda node: self.remove_ship_node(node[0], node[1], my=True), [x for y in ship_nodes for x in y]))
+        deque(map(lambda node: self.remove_partial_ship_node(node[0], node[1], my=True), [x for y in ship_nodes for x in y]))
+        timer.print('ships removed')
+
+        # Ship Radii 1 - Only if not in mine or ship (start using same decay)
+        future_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in ships if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
+        # enemy_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in game.enemy_ships.values() if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
+        if ENABLE_SHIP_RADII_1:
+            nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in future_ship_positions]
+            nodes = [y for x in nodes_2d for y in x]
+            deque(map(lambda node: self.remove_full_ship_radii_1(node[0], node[1]), nodes))
+            deque(map(lambda node: self.remove_partial_ship_radii_1(node[0], node[1]), nodes))
+            timer.print('ship radii 1 removed')
 
         # This appears to decrease the result
         # Ship Radii 2 - Only if not in mine or ship (start using same decay)
-        nodes_2d = [self.map.neighbours(x.x, x.y, search_range=2) for x in future_ship_positions]
-        nodes = [y for x in nodes_2d for y in x]
-        deque(map(lambda node: self.remove_full_ship_radii_2(node[0], node[1]), nodes))
-        deque(map(lambda node: self.remove_partial_ship_radii_2(node[0], node[1]), nodes))
-        timer.print('ship radii 2 removed')
+        if ENABLE_SHIP_RADII_2:
+            nodes_2d = [self.map.neighbours(x.x, x.y, search_range=2) for x in future_ship_positions]
+            nodes = [y for x in nodes_2d for y in x]
+            deque(map(lambda node: self.remove_full_ship_radii_2(node[0], node[1]), nodes))
+            deque(map(lambda node: self.remove_partial_ship_radii_2(node[0], node[1]), nodes))
+            timer.print('ship radii 2 removed')
 
     def clamp_coords_within_bounds(self, x, y):
         if x >= self.x_max:
@@ -430,7 +487,7 @@ class Graph:
         full_key = int(key / 100)*100
 
         # Check for cannonball cost
-        for test_step in [t-x for x in range(-2,3) if 14 >= t-x >= 0]:
+        for test_step in [t-x for x in range(-1,0) if 14 >= t-x >= 0]:
             if full_key in self.full_cannonball_nodes[test_step] or key in self.partial_cannonball_nodes[test_step]:
                 return CANNONBALL_COST
 
@@ -443,6 +500,9 @@ class Graph:
 
         if full_key in self.full_ship_nodes or key in self.partial_ship_nodes:
             cost = SHIP_COST / (1+t**2)
+            return cost if cost > potential_cost else potential_cost
+        elif full_key in self.my_full_ship_nodes or key in self.my_partial_ship_nodes:
+            cost = MY_SHIP_COST / (1+t**2)
             return cost if cost > potential_cost else potential_cost
         elif full_key in self.full_ship_radii_1 or key in self.partial_ship_radii_1:
             cost = SHIP_RADII_1_COST / (1+t**2)
@@ -467,16 +527,25 @@ class Graph:
                     full_ignore=[self.full_mine_nodes])
                 ), range(6)))
 
-    def remove_ship_node(self, x, y):
+    def remove_ship_node(self, x, y, my=False):
         key = self.encode_node_key(x, y, 0, 0)
         if key not in self.full_mine_nodes:
-            self.full_ship_nodes.add(key)
+            if my:
+                self.my_full_ship_nodes.add(key)
+            else:
+                self.full_ship_nodes.add(key)
 
-    def remove_partial_ship_node(self, x, y):
-        deque(map(lambda r: self.partial_ship_nodes.update(self.node_partials(x, y, r,
-                    full_ignore=[self.full_mine_nodes, self.full_ship_nodes],
-                    partial_ignore=[self.partial_mine_nodes, self.partial_ship_nodes])
-                ), range(6)))
+    def remove_partial_ship_node(self, x, y, my=False):
+        if my:
+            deque(map(lambda r: self.my_partial_ship_nodes.update(self.node_partials(x, y, r,
+                        full_ignore=[self.full_mine_nodes, self.full_ship_nodes, self.my_full_ship_nodes],
+                        partial_ignore=[self.partial_mine_nodes, self.partial_ship_nodes, self.my_partial_ship_nodes])
+                    ), range(6)))
+        else:
+            deque(map(lambda r: self.partial_ship_nodes.update(self.node_partials(x, y, r,
+                        full_ignore=[self.full_mine_nodes, self.full_ship_nodes],
+                        partial_ignore=[self.partial_mine_nodes, self.partial_ship_nodes])
+                    ), range(6)))
 
     def remove_mine_radii(self, x, y):
         key = self.encode_node_key(x, y, 0, 0)
@@ -639,8 +708,13 @@ class Graph:
 
     def find_closest(self, point):
         available = []
-        for x in range(1, 3):
-            for neighbour in self.map.neighbours(point.x, point.y, search_range=x):
+        for x in range(1, 10):
+            if x > 2:
+                neighbours = self.map.old_neighbours(point.x, point.y, search_range=x)
+                neighbours = [(x.x, x.y) for x in neighbours]
+            else:
+                neighbours = self.map.neighbours(point.x, point.y, search_range=x)
+            for neighbour in neighbours:
                 neighbour = Position(neighbour[0], neighbour[1])
                 if self.in_grid(neighbour):
                     count = 0
@@ -653,7 +727,7 @@ class Graph:
 
         return sorted(available, key=lambda x: x[1], reverse=True)[0][0]
 
-    def check_for_goal(self, cur, pre, entity):
+    def check_for_goal(self, cur, pre=None, entity=None):
         # The pre-state should not have any points
         # Speed 1 adds two to the base
         # Speed 2 adds three to the base
@@ -661,19 +735,20 @@ class Graph:
         if entity.x == cur.x and entity.y == cur.y:
             return True
 
-        if cur.speed > 0:
-            speed_1 = pre.get_neighbor(self.map.abs_rotation(pre.rotation)).get_neighbor(self.map.abs_rotation(pre.rotation))
-            if entity.x == speed_1.x and entity.y == speed_1.y:
-                # log('Got with speed_1')
-                return True
-
-            if cur.speed > 1:
-                speed_2 = speed_1.get_neighbor(self.map.abs_rotation(pre.rotation))
-                if entity.x == speed_2.x and entity.y == speed_2.y:
-                    # log('Got with speed_2')
+        if pre is not None:
+            if cur.speed > 0:
+                speed_1 = pre.get_neighbor(self.map.abs_rotation(pre.rotation)).get_neighbor(self.map.abs_rotation(pre.rotation))
+                if entity.x == speed_1.x and entity.y == speed_1.y:
+                    # log('Got with speed_1')
                     return True
 
-        if cur.rotation != pre.rotation:
+                if cur.speed > 1:
+                    speed_2 = speed_1.get_neighbor(self.map.abs_rotation(pre.rotation))
+                    if entity.x == speed_2.x and entity.y == speed_2.y:
+                        # log('Got with speed_2')
+                        return True
+
+        if pre is None or cur.rotation != pre.rotation:
             bow = cur.get_neighbor(cur.rotation)
             if entity.x == bow.x and entity.y == bow.y:
                 # log('Got with bow_rot')
@@ -687,6 +762,7 @@ class Graph:
         return False
 
     def find_path(self, ship, entity, waypoints=None):
+        distance_to_entity = ship.calculate_distance_between(entity)
         waypoints = [entity] if waypoints is None else [entity] + waypoints
 
         if not self.in_grid(entity):
@@ -713,26 +789,31 @@ class Graph:
             points_checked += 1
             if points_checked % 20 == 0:
                 log('WARNING: path > {}'.format(points_checked))
-                if points_checked % 150 == 0:
+                if points_checked > 150 and len(ok_solutions) > 0:
+                    log('ok solution found')
+                    break
+                if points_checked > 300:
+                    log('ok solution found')
                     return False
 
             wait, current_waypoint, cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
             current_no_w = current - (current_waypoint*1000000 + wait*10000000)
 
             # Check if we have reached the last waypoint
-            if came_from[current] is not None:
+            if came_from[current] is not None and current_waypoint == (len(waypoints)-1):
                 pre_wi, pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
                 final_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), Position(pre_x, pre_y, pre_r, pre_s), waypoints[-1])
                 if final_point:
                     final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
                     solutions.append(final_point)
-                    if len(solutions) > 3:
+                    if len(solutions) > MINIMUM_SOLUTIONS:
                         break
-            else:
-                if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
+            elif current_waypoint == (len(waypoints)-1):
+                final_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), entity=waypoints[-1])
+                if final_point:
                     final_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
                     solutions.append(final_point)
-                    if len(solutions) > 3:
+                    if len(solutions) > MINIMUM_SOLUTIONS:
                         break
 
             # Check if we have reached the next waypoint
@@ -740,15 +821,17 @@ class Graph:
                 pre_wi, pre_w, pre_x, pre_y, pre_r, pre_s = self.decode_node_key(came_from[current])
                 current_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s),
                                                   Position(pre_x, pre_y, pre_r, pre_s), waypoints[current_waypoint])
-                if current_waypoint == 0:
-                    ok_solutions.append(current_point)
                 if current_point:
-                    current_waypoint += 1
-            elif current_waypoint < (len(waypoints)-1):
-                if cur_x == entity.x and cur_y == entity.y and cur_r == entity.rotation and cur_s == entity.speed:
                     if current_waypoint == 0:
                         current_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
                         ok_solutions.append(current_point)
+                    current_waypoint += 1
+
+            elif current_waypoint < (len(waypoints)-1):
+                current_point = self.check_for_goal(Position(cur_x, cur_y, cur_r, cur_s), entity=waypoints[current_waypoint])
+                if current_point:
+                    current_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
+                    ok_solutions.append(current_point)
                     current_waypoint += 1
 
             for next in self.neighbours(current_no_w):
@@ -761,22 +844,33 @@ class Graph:
                 next_key = self.encode_node_key(next.x, next.y, next.rotation, next.speed, current_waypoint, next_wait)
                 next_key_no_w = self.encode_node_key(next.x, next.y, next.rotation, next.speed)
 
-                straight_mod, speed_mod = 1, 1
-                hex_cost = self.get_hex_cost(next_key_no_w, timestep)
+                planned_mod, straight_mod, speed_mod, edge_mod = 1, 1, 1, 1
 
-                if hex_cost > 0:
-                    add_cost = hex_cost
+                distance_to_next = ship.calculate_distance_between(next)
+                if distance_to_next <= 6 or distance_to_next <= distance_to_entity:
+                # if ship.calculate_distance_between(next) <= 6:
+                    hex_cost = self.get_hex_cost(next_key_no_w, timestep)
                 else:
-                    # Speed modifier - we prefer moving over not moving
-                    speed_mod = 1.2 if cur_s > 0 else 1
-                    # Can we make a non-movement action?
-                    if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
-                        straight_mod = 1
-                    else:
-                        straight_mod = 1.6
-                    add_cost = 0
+                    hex_cost = 0
 
-                cost = (1 * speed_mod * straight_mod) + add_cost
+                # Speed modifier - we prefer moving over not moving
+                speed_mod = SPEED_MULTI if next.speed > 0 else 1
+                edge_mod = EDGE_MULTI if self.map.edge(Position(next.x, next.y)) else 1
+                # Can we make a non-movement action?
+                if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
+                    straight_mod = 1
+                else:
+                    straight_mod = STRAIGHT_MULTI
+
+                if ship.planned_next_target is not None and \
+                                next.x ==  ship.planned_next_target.x and \
+                                next.y == ship.planned_next_target.y and \
+                                next.rotation == ship.planned_next_target.rotation and \
+                                next.speed == ship.planned_next_target.speed:
+                    planned_mod = PLANNED_MULTI
+                    log('planned_mod')
+
+                cost = ((1 * speed_mod * straight_mod) + hex_cost) * planned_mod  * edge_mod
 
                 new_cost = cost_so_far[current] + cost
                 if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
@@ -852,7 +946,7 @@ class Map:
             self.grid[barrel.y][barrel.x] = BARREL
 
     def add_mines(self, mines):
-        for mine in mines:
+        for mine in mines.values():
             self.grid[mine.y][mine.x] = MINE
 
     def add_cannonballs(self, cannonballs):
@@ -886,6 +980,23 @@ class Map:
         else:
             return self._neighbours[key] + self._far_neighbours[key]
 
+    def old_neighbours(self, x, y, safe=True, search_range=1):
+        position = Position(x,y)
+        position_neighbours = []
+        for i in range(6):
+            neighbour_position = position.get_neighbor(i)
+            for _ in range(search_range-1):
+                neighbour_position = neighbour_position.get_neighbor(i)
+            if safe:
+                if 0 <= neighbour_position.y < self.y and 0 <= neighbour_position.x < self.x:
+                    if self.grid[neighbour_position.y][neighbour_position.x] != MINE or \
+                                    self.grid[neighbour_position.y][neighbour_position.x] != CANNONBALL:
+                        position_neighbours.append(neighbour_position.get_neighbor(i))
+            else:
+                if 0 <= neighbour_position.y < self.x and 0 <= neighbour_position.x < self.x:
+                    position_neighbours.append(neighbour_position.get_neighbor(i))
+        return position_neighbours
+
     def compile_neighbours(self):
         for x in range(self.x):
             for y in range(self.y):
@@ -910,6 +1021,23 @@ class Map:
 
     def out_of_range(self, position):
         return position.x >= self.x or position.y >= self.y or position.x < 0 or position.y < 0
+
+    def edge(self, position):
+        return position.x >= (self.x-1) or position.y >= (self.y-1) or position.x < 1 or position.y < 1
+    #
+    # def distances_to_mines(self, point, mines):
+    #     distances = [(mine, point.calculate_distance_between(mine)) for mine in mines.values()]
+    #     sorted_distances = sorted(distances, key=lambda x: x[1])
+    #     return sorted_distances
+    #
+    # def determine_waypoints(self, game):
+    #     for x in range(4, 19, 3):
+    #         for y in range(3, 18, 5):
+    #             position = Position(x,y)
+    #             # Find the optimal position
+    #             for neighbour in self.neighbours(x, y, search_range=2, all=True) + [(x,y)]:
+    #                 if self.grid[neighbour[0]][neighbour[1]] != MINE:
+    #                     for mine in self.distances_to_mines(position(neighbour[0],neighbour[1])):
 
 
 class Cube:
@@ -983,16 +1111,13 @@ class Ship(Entity):
         self.graph = graph
         self.navigate_action = None
         self.next_waypoint = None
+        self.planned_next_target = None
 
-        self.waypoints = [Position(5,5),
-                          Position(11, 4),
-                          Position(17,5),
-                          Position(18, 10),
-                          Position(17,15),
-                          Position(11, 16),
-                          Position(5,15),
-                          Position(4,10)
-                          ]
+        self.waypoints = []
+        for x in range(5, 18, 3):
+            for y in range(5, 16, 5):
+                self.waypoints.append(Position(x, y))
+
         self.waypoint = None
 
         self.cannonball = 10
@@ -1089,10 +1214,11 @@ class Ship(Entity):
             rem_forward = False
 
         for neighbour in self.graph.map.neighbours(self.fire_x, self.fire_y):
-            if 0 <= neighbour[1] < self.graph.map.y and 0 <= neighbour[0] < self.graph.map.x and self.graph.map.grid[neighbour[1]][neighbour[0]] == MINE:
-                self.fire_x, self.fire_y = neighbour[0], neighbour[1]
-                #log('Firing on mine')
-                break
+            if 0 <= neighbour[1] < self.graph.map.y and 0 <= neighbour[0] < self.graph.map.x:
+                if self.graph.map.grid[neighbour[1]][neighbour[0]] == MINE:
+                    self.fire_x, self.fire_y = neighbour[0], neighbour[1]
+                    #log('Firing on mine')
+                    break
 
         #log('FIRE : estimated_time:{} : target_point:({},{}) : distance:{}'.format(fire_time, self.fire_x, self.fire_y, distance))
 
@@ -1169,6 +1295,14 @@ class Ship(Entity):
         if path == False:
             return False
         self.navigate_action = self.determine_move(path[-2:])
+
+        # Store the next move that was planned and make it a
+        # little cheaper so it is based towards it next turn to help with navigation
+        if len(path) > 2:
+            self.planned_next_target = Position(path[-3][0], path[-3][1], path[-3][2], path[-3][3])
+        else:
+            self.planned_next_target = None
+
         self.action = self._print_navigate
 
         log('navigate_action: {}'.format(self.navigate_action))
@@ -1186,10 +1320,15 @@ class Ship(Entity):
                       key=lambda x: Position(self.waypoints[x].x, self.waypoints[x].y).calculate_distance_between(enemy_ship),
                       reverse=avoid)
 
-    def waypoint_move(self, enemy_ships):
+    def waypoint_move(self, enemy_ships, my_ships):
         #log(enemy_ships)
         if self.waypoint is None or self.calculate_distance_between(self.waypoints[self.waypoint]) <= 3:
-            ordered_waypoints = self.ordered_waypoints(enemy_ships)[:3]
+            ordered_waypoints = self.ordered_waypoints(enemy_ships)
+            current_waypoints = [[ship.waypoint, ship.next_waypoint] for ship in my_ships.values() if ship.id != self.id]
+            flattend_current_waypoints = [x for y in current_waypoints for x in y]
+            log('flattened waypoints: {}'.format(flattend_current_waypoints))
+            reduced_set = [waypoint for waypoint in ordered_waypoints if waypoint not in flattend_current_waypoints]
+            ordered_waypoints = [waypoint for waypoint in reduced_set if self.calculate_distance_between(self.waypoints[waypoint]) > 3][:3]
 
             if self.next_waypoint in ordered_waypoints:
                 self.waypoint = self.next_waypoint
@@ -1213,12 +1352,18 @@ class Ship(Entity):
                                 different2 = True
                         different = True
 
-        if self.graph.in_grid(Position(self.waypoints[self.waypoint].x, self.waypoints[self.waypoint].y)):
-            nav = Position(self.waypoints[self.waypoint].x, self.waypoints[self.waypoint].y)
-        else:
-            nav = self.graph.find_closest(Position(self.waypoints[self.waypoint].x, self.waypoints[self.waypoint].y))
+        point = self.get_reachable_point(self.waypoint)
+        point_2 = self.get_reachable_point(self.next_waypoint)
 
-        return self.navigate(nav)
+        return point, point_2
+
+    def get_reachable_point(self, point):
+        if self.graph.in_grid(Position(self.waypoints[point].x, self.waypoints[point].y)):
+            nav = Position(self.waypoints[point].x, self.waypoints[point].y)
+        else:
+            nav = self.graph.find_closest(Position(self.waypoints[point].x, self.waypoints[point].y))
+
+        return nav
 
     def guaranteed_mine_hit(self, ships):
         mine_position = self.get_neighbor(self.graph.map.abs_rotation(self.rotation+3)).get_neighbor(self.graph.map.abs_rotation(self.rotation+3))
@@ -1323,6 +1468,7 @@ class Position(Entity):
         return "Entity {} at position: (x = {}, y = {})"\
             .format(self.__class__.__name__, self.x, self.y)
 
+
 class AI:
     def __init__(self):
         self.game = Game()
@@ -1364,67 +1510,88 @@ class AI:
             barrel_distances[barrel1.id] = sorted([(barrel2, barrel1.calculate_distance_between(barrel2)) for barrel2 in barrels if barrel2.id != barrel1.id], key=lambda x: x[1])
         return barrel_distances
 
+    def assign_barrels(self):
+        taken_barrels = set()
+        if len(self.game.barrels) > 0:
+            barrel_barrel_distances = self.barrel_barrel_distances(self.game.barrels)
+            barrel_ship_distances = self.barrel_ship_distances(self.game.my_ships, self.game.barrels)
+            for i, barrel_ship in enumerate(barrel_ship_distances):
+                if len(taken_barrels) >= len(self.game.barrels) or len(self.assigned_ships) >= len(self.game.my_ships):
+                    break
+                if barrel_ship[0].id in taken_barrels or barrel_ship[1].id in self.assigned_ships:
+                    continue
+
+                log('ship ({}) navigating to barrel ({})'.format(barrel_ship[1].id, barrel_ship[0].id))
+
+                # Get possible next barrel
+                next_barrel = None
+                for barrel in barrel_barrel_distances[barrel_ship[0].id]:
+                    if barrel[0].id not in taken_barrels and barrel[0].id != barrel_ship[0].id:
+                        next_barrel = barrel[0]
+                        break
+
+                if next_barrel is None:
+                    if barrel_ship[1].next_waypoint is None:
+                        ordered_waypoints = barrel_ship[1].ordered_waypoints(self.game.enemy_ships)[:3]
+                        next_barrel_id = random.choice(ordered_waypoints)
+                        barrel_ship[1].next_waypoint = next_barrel_id
+
+                    next_barrel = barrel_ship[1].waypoints[barrel_ship[1].next_waypoint]
+
+                self.assigned_ships[barrel_ship[1].id] = {'action': 'barrel',
+                                                  'target_nav': barrel_ship[0],
+                                                  'waypoints': [next_barrel]
+                                                  }
+
+                taken_barrels.add(barrel_ship[0].id)
+
+                for dist_barrel in barrel_barrel_distances[barrel_ship[0].id]:
+                    if dist_barrel[1] <= 2:
+                        taken_barrels.add(dist_barrel[0].id)
+                        log('taken: {}'.format(dist_barrel[0].id))
+                    else:
+                        break
+
+    def assign_waypoints(self):
+        for id, ship in self.game.my_ships.items():
+            if id not in self.assigned_ships:
+                point, point_2 = ship.waypoint_move(self.game.enemy_ships, self.game.my_ships)
+
+                self.assigned_ships[id] = {'action': 'waypoint',
+                                          'target_nav': point,
+                                          'waypoints': [point_2]
+                                          }
+
     def run(self, load=False):
         while True:
+            self.assigned_ships = {}
+
             time_a = time.time()
 
             self.game.update_map(load=load)
 
-            # Assign barrels
-            taken_barrels = set()
-            assigned_ships = set()
-            if len(self.game.barrels) > 0:
-                barrel_barrel_distances = self.barrel_barrel_distances(self.game.barrels)
-                barrel_ship_distances = self.barrel_ship_distances(self.game.my_ships, self.game.barrels)
-                for i, barrel_ship in enumerate(barrel_ship_distances):
-                    if len(taken_barrels) >= len(self.game.barrels) or len(assigned_ships) >= len(self.game.my_ships):
-                        break
-                    if barrel_ship[0].id in taken_barrels or barrel_ship[1].id in assigned_ships:
-                        continue
+            self.assign_barrels()
+            log('assigned barrels')
+            self.assign_waypoints()
+            log('assigned waypoints')
 
-                    log('ship ({}) navigating to barrel ({})'.format(barrel_ship[1].id, barrel_ship[0].id))
+            for ship_id, navigation in self.assigned_ships.items():
+                self.game.graph.remove_ship_set([ship for ship in self.game.my_ships.values() if ship.id != ship_id], self.game)
+                result = self.game.my_ships[ship_id].navigate(navigation['target_nav'], waypoints=navigation['waypoints'])
+                if result:
+                    success = 'success'
+                else:
+                    success = 'failed'
+                    self.game.my_ships[ship_id].no_action()
 
-                    # Get possible next barrel
-                    next_barrel = None
-                    for barrel in barrel_barrel_distances[barrel_ship[0].id]:
-                        if barrel[0].id not in taken_barrels and barrel[0].id != barrel_ship[0].id:
-                            next_barrel = barrel[0]
-                            break
-
-                    if next_barrel is None:
-                        if barrel_ship[1].next_waypoint is None:
-                            ordered_waypoints = barrel_ship[1].ordered_waypoints(self.game.enemy_ships)[:3]
-                            next_barrel_id = random.choice(ordered_waypoints)
-                            barrel_ship[1].next_waypoint = next_barrel_id
-
-                        next_barrel = barrel_ship[1].waypoints[barrel_ship[1].next_waypoint]
-
-                    result = barrel_ship[1].navigate(barrel_ship[0], [next_barrel])
-                    if result:
-                        assigned_ships.add(barrel_ship[1].id)
-                        taken_barrels.add(barrel_ship[0].id)
-
-                        log(str(barrel_ship[0].id))
-                        log(str(barrel_barrel_distances[barrel_ship[0].id]))
-
-                        for dist_barrel in barrel_barrel_distances[barrel_ship[0].id]:
-                            if dist_barrel[1] <= 2:
-                                taken_barrels.add(dist_barrel[0].id)
-                                log('taken: {}'.format(dist_barrel[0].id))
-                            else:
-                                break
+                log('{} - ship_id: {}, action: {}, target_nav: {}, waypoint: {}'.format(success,
+                                                                                        ship_id,
+                                                                                        navigation['action'],
+                                                                                        navigation['target_nav'],
+                                                                                        navigation['waypoints'][0]))
 
             for id, ship in self.game.my_ships.items():
-                timer.print('ship {}'.format(id))
                 closest_ship, distance_to_closest_ship = self.get_closest_enemy_ship(ship, self.game.enemy_ships)
-
-                if ship.navigate_action is None or ship.action is None:
-                    # Start a grid based movement pattern
-                    log('ship ({}) grid based movement'.format(id))
-                    result = ship.waypoint_move(self.game.enemy_ships)
-                    if not result:
-                        ship.no_action()
-
                 if ship.navigate_action == 'WAIT' or ship.navigate_action is None or ship.action is None:
                     lay_mine=MAYBE
                     if ship.can_lay_mine():
@@ -1437,9 +1604,9 @@ class AI:
                             lay_mine = NO
 
                     if ship.can_fire() and lay_mine != YES:
-                        log('ship ({}) firing'.format(id))
                         result = ship.fire(closest_ship)
                         if result:
+                            log('ship ({}) firing'.format(id))
                             continue
 
                     if lay_mine != NO:
@@ -1448,6 +1615,8 @@ class AI:
                     else:
                         log('ship ({}) no_action'.format(id))
                         ship.no_action()
+
+
 
             for id, ship in self.game.my_ships.items():
                 log(str(ship.action))

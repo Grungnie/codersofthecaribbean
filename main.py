@@ -1266,7 +1266,7 @@ class Ship(Entity):
         if self.will_likely_hit_ship(self.fire_x, self.fire_y):
             fire_position = Position(self.fire_x, self.fire_y)
             while True:
-                fire_position = fire_position.get_neighbor(self.graph.map.abs_rotation(entity-3))
+                fire_position = fire_position.get_neighbor(self.graph.map.abs_rotation(entity.rotation-3))
                 if not self.will_likely_hit_ship(fire_position.x, fire_position.y):
                     self.fire_x, self.fire_y = fire_position.x, fire_position.y
                     break

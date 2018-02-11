@@ -3,7 +3,7 @@ from main import Game, Graph, Ship, Position
 game = Game()
 game.update_map(load='3')
 
-game.print_map()
+#game.print_map(waypoints=True)
 
 #graph = Graph(game.map)
 #game.update_map(load='3')

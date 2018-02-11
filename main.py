@@ -422,7 +422,7 @@ class Graph:
         # Mine Radii 1 - only if not in mine
         if ENABLE_MINE_RADII or ENABLE_CANNONBALL_MINES:
             if ENABLE_CANNONBALL_MINES:
-                mines = [mine for mine in game.mines.values() for cannonball in game.cannonballs if mine.x == cannonball.x and mine.y == cannonball.x]
+                mines = [mine for mine in game.mines.values() for cannonball in game.cannonballs if mine.x == cannonball.x and mine.y == cannonball.y]
             else:
                 mines = game.mines.values()
             nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in mines]
@@ -907,6 +907,7 @@ class Graph:
                             else:
                                 hex_cost -= 39
 
+                    # This seems to reduce performance... need to test - it will become better when
                     if closest_distance < 6 and next.speed == 0:
                         # distance < 6 : not allowed to move to a position that would not allow the ship to move forward if required
                         bow = next.get_neighbor(next.rotation)

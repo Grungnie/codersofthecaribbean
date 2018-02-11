@@ -45,6 +45,10 @@ STRAIGHT_MULTI = 1.6
 EDGE_MULTI = 1.4
 PLANNED_MULTI = 0.8
 
+CLOSE_SPEED_MULTI = 2
+CLOSE_STRAIGHT_MULTI = 1
+CLOSE_MINE_PENALTY = 40
+
 # Set these to control the modifiers to search for
 ENABLE_MINE_RADII = False
 ENABLE_CANNONBALL_MINES = True
@@ -81,7 +85,7 @@ class Game:
         self.barrels = []
         self.mines = {}
         self.map = Map(23, 21)
-        self.graph = Graph(self.map)
+        self.graph = Graph(self.map, self)
 
         self.my_ship_count = None
         self.entity_count = None
@@ -249,10 +253,11 @@ class Game:
 
 
 class Graph:
-    def __init__(self, map):
+    def __init__(self, map, game):
         self.x_max = map.x
         self.y_max = map.y
         self.map = map
+        self.game = game
         self.graph = {}
 
         self.full_cannonball_nodes = [set() for _ in range(15)]
@@ -426,7 +431,7 @@ class Graph:
             deque(map(lambda node: self.remove_partial_mine_radii(node[0], node[1]), nodes))
             timer.print('mine radii removed')
 
-    def remove_ship_set(self, ships, game):
+    def remove_ship_set(self, ships):
         self.my_full_ship_nodes.clear()
         self.my_partial_ship_nodes.clear()
 
@@ -436,7 +441,7 @@ class Graph:
         timer.print('ships removed')
 
         # Ship Radii 1 - Only if not in mine or ship (start using same decay)
-        future_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in ships if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
+        future_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in ships if self.check_distance_to_entities(ship, self.game.my_ships.values(), 5)]
         # enemy_ship_positions = [self.clamp_position_within_bounds(self.future_ship_position(ship)) for ship in game.enemy_ships.values() if self.check_distance_to_entities(ship, game.my_ships.values(), 5)]
         if ENABLE_SHIP_RADII_1:
             nodes_2d = [self.map.neighbours(x.x, x.y, search_range=1) for x in future_ship_positions]
@@ -594,10 +599,12 @@ class Graph:
 
         bow = ship.get_neighbor(ship.rotation)
         stern = ship.get_neighbor(self.map.abs_rotation(ship.rotation + 3))
+        mine = stern.get_neighbor(self.map.abs_rotation(ship.rotation + 3))
 
         nodes.append((ship.x, ship.y))
         nodes.append((bow.x, bow.y))
         nodes.append((stern.x, stern.y))
+        nodes.append((mine.x, mine.y))
 
         forward_move = bow.get_neighbor(ship.rotation)
         if rem_forward:
@@ -780,6 +787,15 @@ class Graph:
 
         return False
 
+    def get_closest_bow(self, ship):
+        closest = 10000
+        for enemy_ship in self.game.enemy_ships.values():
+            bow = enemy_ship.get_neighbor(enemy_ship.rotation)
+            distance = bow.calculate_distance_between(ship)
+            if distance < closest:
+                closest = distance
+        return closest
+
     def find_path(self, ship, entity, waypoints=None):
         distance_to_entity = ship.calculate_distance_between(entity)
         waypoints = [entity] if waypoints is None else [entity] + waypoints
@@ -872,14 +888,51 @@ class Graph:
                 else:
                     hex_cost = 0
 
+                speed_mod_value = SPEED_MULTI
+                straight_mod_value = STRAIGHT_MULTI
+                close_mine_penalty = 0
+
+                if timestep == 0:
+                    # distance < 4 : Apply increased penalty if not moving with ships withing short distance, possibly negate straight move bonus
+                    closest_distance = self.get_closest_bow(ship)
+                    if closest_distance < 4:
+                        speed_mod_value = CLOSE_SPEED_MULTI
+                        straight_mod_value = CLOSE_STRAIGHT_MULTI
+
+                        # This is to negate the ship penalties but keep the mine penalties
+                        # If we check for valid moves it should for the most part remove the need to ship penalties
+                        if hex_cost > 0:
+                            if hex_cost < 40:
+                                hex_cost = 1
+                            else:
+                                hex_cost -= 39
+
+                    if closest_distance < 6 and next.speed == 0:
+                        # distance < 6 : not allowed to move to a position that would not allow the ship to move forward if required
+                        bow = next.get_neighbor(next.rotation)
+                        first_possible_forward = bow.get_neighbor(next.rotation)
+                        second_possible_forward = bow.get_neighbor(next.rotation)
+
+                        if (not self.map.out_of_range(first_possible_forward) and  self.map.grid[first_possible_forward.y][first_possible_forward.x] == MINE) or \
+                            (not self.map.out_of_range(second_possible_forward) and self.map.grid[second_possible_forward.y][second_possible_forward.x] == MINE):
+                            close_mine_penalty = CLOSE_MINE_PENALTY
+
+
+                    # Check if the last move was possible - make that move invalid (just make the cost high (not quite as high as a mine))
+
+                    # Is the move possible
+
+
+
+
                 # Speed modifier - we prefer moving over not moving
-                speed_mod = SPEED_MULTI if next.speed > 0 else 1
+                speed_mod = speed_mod_value if next.speed > 0 else 1
                 edge_mod = EDGE_MULTI if self.map.edge(Position(next.x, next.y)) else 1
                 # Can we make a non-movement action?
                 if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
                     straight_mod = 1
                 else:
-                    straight_mod = STRAIGHT_MULTI
+                    straight_mod = straight_mod_value
 
                 if ship.planned_next_target is not None and \
                                 next.x ==  ship.planned_next_target.x and \
@@ -889,7 +942,10 @@ class Graph:
                     planned_mod = PLANNED_MULTI
                     log('planned_mod')
 
-                cost = ((1 * speed_mod * straight_mod) + hex_cost) * planned_mod  * edge_mod
+
+
+
+                cost = ((1 * speed_mod * straight_mod) + hex_cost + close_mine_penalty) * planned_mod  * edge_mod
 
                 new_cost = cost_so_far[current] + cost
                 if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
@@ -1398,6 +1454,16 @@ class Ship(Entity):
         log('navigate_action: {}'.format(self.navigate_action))
         return True
 
+    def get_closest_enemy_ship(self, ship, enemy_ships):
+        closest_enemy_ship = None
+        closest_distance = 10000
+        for id, enemy_ship in enemy_ships.items():
+            distance = ship.calculate_distance_between(enemy_ship)
+            if distance < closest_distance:
+                closest_distance = distance
+                closest_enemy_ship = enemy_ship
+        return closest_enemy_ship, closest_distance
+
     def should_avoid(self, enemy_ships):
         highest_health_enemy = max([[x.rum, x] for i, x in enemy_ships.items()], key=lambda x: x[0])
         if self.rum > highest_health_enemy[0]:
@@ -1666,7 +1732,7 @@ class AI:
             log('assigned waypoints')
 
             for ship_id, navigation in self.assigned_ships.items():
-                self.game.graph.remove_ship_set([ship for ship in self.game.my_ships.values() if ship.id != ship_id], self.game)
+                self.game.graph.remove_ship_set([ship for ship in self.game.my_ships.values() if ship.id != ship_id])
                 result = self.game.my_ships[ship_id].navigate(navigation['target_nav'], waypoints=navigation['waypoints'])
                 if result:
                     success = 'success'

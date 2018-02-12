@@ -40,6 +40,14 @@ MINE_RADII_COST = 50
 SHIP_RADII_1_COST = 2
 SHIP_RADII_2_COST = 1
 
+all_set = 40
+COLLISION_FASTER_COST = all_set
+COLLISION_SLOWER_COST = all_set
+COLLISION_STARBOARD_COST = all_set
+COLLISION_PORT_COST = all_set
+COLLISION_WAIT_COST = 20
+COLLISION_WAIT_NO_COOLDOWN_COST = all_set
+
 SPEED_MULTI = 1.2
 STRAIGHT_MULTI = 1.6
 EDGE_MULTI = 1.4
@@ -147,9 +155,12 @@ class Game:
         timer.print('nodes removed')
 
         self.map.determine_waypoints(self)
-        timer.print('determine waypoints')
+        timer.print('determined waypoints')
 
         # self.print_map(waypoints=True)
+        self.apply_collisions()
+        timer.print('apply collisions')
+
 
     def print_map(self,  waypoints=False):
         for i, row in enumerate(self.map.grid):
@@ -250,6 +261,26 @@ class Game:
             del self.mines[id]
 
         log('{} active mines'.format(len(self.mines)))
+
+    def apply_collisions(self):
+        moves = {}
+        for ship_set in [self.my_ships, self.enemy_ships]:
+            for id in ship_set:
+                moves[id] = 'WAIT'
+        collisions = self.graph.calculate_collisions(moves, overview=True)
+        log(collisions)
+
+        for id, speed in collisions.items():
+            if id in self.enemy_ships:
+                if speed == 0:
+                    self.enemy_ships[id].speed = 0
+                if speed == 1:
+                    self.enemy_ships[id].speed = 0
+                    position = self.enemy_ships[id].get_neighbour(self.enemy_ships[id].rotation)
+
+                    self.enemy_ships[id].x = position.x
+                    self.enemy_ships[id].y = position.y
+
 
 
 class Graph:
@@ -815,6 +846,41 @@ class Graph:
 
         distance_costs = [waypoints[x].calculate_distance_between(waypoints[x+1]) for x in range(len(waypoints)-1)] + [0]
 
+        # Get collisions
+        check_ships = {}
+        moves = {}
+        for ships_set in [self.game.enemy_ships.items(), self.game.my_ships.items()]:
+            for id, col_ship in ships_set:
+                moves[id] = [col_ship.str_action]
+                #if ship.id != col_ship.id and ship.calculate_distance_between(col_ship) < 6:
+                check_ships[id] = col_ship
+
+        collision_move = {
+            'WAIT': False,
+            'FASTER': False,
+            'SLOWER': False,
+            'STARBOARD': False,
+            'PORT': False
+        }
+
+        for move in collision_move:
+            moves[ship.id] = [move]
+            collision_move[move] = self.calculate_collisions(moves, check_id=ship.id)
+
+        log('collision result for {}, {}'.format(ship.id, collision_move))
+
+        # There was no possible option found to avoid crashing
+        found_option = False
+        for type, move in collision_move.items():
+            if not move and type != 'SLOWER':
+                found_option = True
+                break
+
+        if not found_option:
+            ship.ignore_mine = True
+            return False
+
+
         points_checked = 0
         while len(frontier) > 0:
             priority, current_timestep = heapq.heappop(frontier)
@@ -827,7 +893,7 @@ class Graph:
                 if points_checked > 150 and len(ok_solutions) > 0:
                     log('ok solution found')
                     break
-                if points_checked > 300:
+                if points_checked > 200:
                     log('ok solution found')
                     return False
 
@@ -891,6 +957,7 @@ class Graph:
                 speed_mod_value = SPEED_MULTI
                 straight_mod_value = STRAIGHT_MULTI
                 close_mine_penalty = 0
+                collision_penalty = 0
 
                 if timestep == 0:
                     # distance < 4 : Apply increased penalty if not moving with ships withing short distance, possibly negate straight move bonus
@@ -920,11 +987,21 @@ class Graph:
 
 
                     # Check if the last move was possible - make that move invalid (just make the cost high (not quite as high as a mine))
-
                     # Is the move possible
 
-
-
+                    if next.speed > cur_s and collision_move['FASTER']:
+                        collision_penalty = COLLISION_FASTER_COST
+                    elif next.speed < cur_s and collision_move['SLOWER']:
+                        collision_penalty = COLLISION_SLOWER_COST
+                    elif next.rotation == self.map.abs_rotation(cur_r + 1) and collision_move['PORT']:
+                        collision_penalty = COLLISION_PORT_COST
+                    elif next.rotation == self.map.abs_rotation(cur_r - 1) and collision_move['STARBOARD']:
+                        collision_penalty = COLLISION_STARBOARD_COST
+                    elif next.rotation == cur_r and next.speed == cur_s and collision_move['WAIT']:
+                        if ship.can_lay_mine() or ship.can_fire():
+                            collision_penalty = COLLISION_WAIT_COST
+                        else:
+                            collision_penalty = COLLISION_WAIT_NO_COOLDOWN_COST
 
                 # Speed modifier - we prefer moving over not moving
                 speed_mod = speed_mod_value if next.speed > 0 else 1
@@ -933,7 +1010,10 @@ class Graph:
                 if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
                     straight_mod = 1
                 else:
-                    straight_mod = straight_mod_value
+                    if timestep == 0 and not (ship.can_fire() or ship.can_lay_mine()):
+                        straight_mod = 1
+                    else:
+                        straight_mod = straight_mod_value
 
                 if ship.planned_next_target is not None and \
                                 next.x ==  ship.planned_next_target.x and \
@@ -946,7 +1026,7 @@ class Graph:
 
 
 
-                cost = ((1 * speed_mod * straight_mod) + hex_cost + close_mine_penalty) * planned_mod  * edge_mod
+                cost = ((1 * speed_mod * straight_mod) + hex_cost + close_mine_penalty + collision_penalty) * planned_mod  * edge_mod
 
                 new_cost = cost_so_far[current] + cost
                 if next_key not in cost_so_far or new_cost < cost_so_far[next_key]:
@@ -994,6 +1074,215 @@ class Graph:
         log(str(path))
 
         return path
+
+    def calculate_collisions(self, raw_moves, ships=None, check_id=None, overview=False):
+        moves = {}
+        overview_set = {}
+
+        log('check_id: {}'.format(check_id))
+
+        if ships is None:
+            for id, ship in self.game.my_ships.items():
+                moves[id] = {
+                    'current_position': Position(ship.x, ship.y, ship.rotation, ship.speed),
+                    'future_bow': None,
+                    'future_mid': None,
+                    'future_stern': None,
+                    'future_rotation': None,
+                    'owner': ME,
+                    'move': raw_moves[id][0],
+                    'detail': [] if len(raw_moves[id]) < 2 else [raw_moves[id][1], raw_moves[id][1]]
+                }
+            for id, ship in self.game.enemy_ships.items():
+                moves[id] = {
+                    'current_position': Position(ship.x, ship.y, ship.rotation, ship.speed),
+                    'future_bow': None,
+                    'future_mid': None,
+                    'future_stern': None,
+                    'future_rotation': None,
+                    'owner': ENEMY,
+                    'move': raw_moves[id][0],
+                    'detail': [] if len(raw_moves[id]) < 2 else [raw_moves[id][1], raw_moves[id][1]]
+                }
+        else:
+            for id, ship in ships.items():
+                moves[id] = {
+                    'current_position': Position(ship.x, ship.y, ship.rotation, ship.speed),
+                    'future_bow': None,
+                    'future_mid': None,
+                    'future_stern': None,
+                    'future_rotation': None,
+                    'owner': ME,
+                    'move': raw_moves[id][0],
+                    'detail': [] if len(raw_moves[id]) < 2 else [raw_moves[id][1], raw_moves[id][1]]
+                }
+
+        # Apply move speed changes
+        for move in moves.values():
+            if move['move'] == 'FASTER' and move['current_position'].speed != 2:
+                move['current_position'].speed += 1
+            elif move['move'] == 'SLOWER' and move['current_position'].speed != 0:
+                move['current_position'].speed -= 1
+
+        for speed in range(2):
+            for move in moves.values():
+                if move['current_position'].speed > speed:
+                    move['future_stern'] = Position(move['current_position'].x, move['current_position'].y)
+                    move['future_mid'] = move['current_position'].get_neighbour(move['current_position'].rotation)
+                    move['future_bow'] = move['future_mid'].get_neighbour(move['current_position'].rotation)
+
+                    move['future_mid'].rotation = move['current_position'].rotation
+                    move['future_mid'].speed = move['current_position'].speed
+                else:
+                    move['future_mid'] = Position(move['current_position'].x, move['current_position'].y, move['current_position'].rotation, move['current_position'].speed)
+                    move['future_stern'] = move['future_mid'].get_neighbour(self.map.abs_rotation(move['current_position'].rotation-3))
+                    move['future_bow'] = move['future_mid'].get_neighbour(move['current_position'].rotation)
+
+            # Check for speed 1 collisions
+            collision = True
+            while collision:
+                reset_ids = []
+                collision = False
+                for id, move in moves.items():
+                    if move['current_position'].speed < speed+1:
+                        continue
+                    for id_opposing, move_opposing in moves.items():
+                        if id == id_opposing:
+                            continue
+                        if move['future_bow'].x == move_opposing['future_bow'].x and move['future_bow'].y == move_opposing['future_bow'].y or \
+                                move['future_bow'].x == move_opposing['future_mid'].x and move['future_bow'].y == move_opposing['future_mid'].y or \
+                                move['future_bow'].x == move_opposing['future_stern'].x and move['future_bow'].y == move_opposing['future_stern'].y:
+                            reset_ids.append(id)
+                            collision = True
+                            log('id: {} crashed into id:{}'.format(id, id_opposing))
+                            overview_set[id] = speed
+                            if check_id == id:
+                                return True
+                            break
+
+                for id in reset_ids:
+                    moves[id]['current_position'].speed = 0
+
+                    moves[id]['future_bow'] = moves[id]['future_mid']
+                    moves[id]['future_mid'] = moves[id]['current_position']
+                    moves[id]['future_stern'] = moves[id]['future_mid'].get_neighbour(self.map.abs_rotation(moves[id]['current_position'].rotation - 3))
+
+                    moves[id]['move'] = 'WAIT' if moves[id]['move'] in ['STARBOARD', 'PORT'] else moves[id]['move']
+
+            # For all the ships that have a speed > 0 update their current position to the future position
+            for move in moves.values():
+                if move['current_position'].speed > speed:
+                    move['current_position'] = move['future_mid']
+
+        for move in moves.values():
+            if move['move'] == 'STARBOARD':
+                move['future_rotation'] = self.map.abs_rotation(move['current_position'].rotation + 1)
+            elif move['move'] == 'PORT':
+                move['future_rotation'] = self.map.abs_rotation(move['current_position'].rotation - 1)
+            else:
+                move['future_rotation'] = move['current_position'].rotation
+
+            move['future_mid'] = Position(move['current_position'].x, move['current_position'].y, move['future_rotation'], move['current_position'].speed)
+            move['future_stern'] = move['future_mid'].get_neighbour(self.map.abs_rotation(move['future_rotation'] - 3))
+            move['future_bow'] = move['future_mid'].get_neighbour(move['future_rotation'])
+
+        # Check for speed 1 collisions
+        collision = True
+        while collision:
+            reset_ids = []
+            collision = False
+            for id, move in moves.items():
+                if move['move'] not in ['STARBOARD', 'PORT']:
+                    continue
+
+                for id_opposing, move_opposing in moves.items():
+                    if id == id_opposing:
+                        continue
+                    if move['future_bow'].x == move_opposing['future_bow'].x and move['future_bow'].y == move_opposing['future_bow'].y or \
+                            move['future_bow'].x == move_opposing['future_mid'].x and move['future_bow'].y == move_opposing['future_mid'].y or \
+                            move['future_bow'].x == move_opposing['future_stern'].x and move['future_bow'].y == move_opposing['future_stern'].y or \
+                            move['future_stern'].x == move_opposing['future_bow'].x and move['future_stern'].y == move_opposing['future_bow'].y or \
+                            move['future_stern'].x == move_opposing['future_mid'].x and move['future_stern'].y == move_opposing['future_mid'].y or \
+                            move['future_stern'].x == move_opposing['future_stern'].x and move['future_stern'].y == move_opposing['future_stern'].y:
+                        reset_ids.append(id)
+
+                        log('id: {} crashed into id:{}'.format(id, id_opposing))
+                        overview_set[id] = move['current_position'].speed
+                        if check_id == id:
+                            return True
+                        collision = True
+                        break
+
+            for id in reset_ids:
+                moves[id]['current_position'].speed = 0
+                moves[id]['move'] = 'WAIT'
+                moves[id]['future_rotation'] = moves[id]['current_position'].rotation
+
+                moves[id]['future_mid'] = Position(moves[id]['current_position'].x, moves[id]['current_position'].y, moves[id]['future_rotation'], moves[id]['current_position'].speed)
+                moves[id]['future_stern'] = moves[id]['future_mid'].get_neighbour(self.map.abs_rotation(moves[id]['future_rotation'] - 3))
+                moves[id]['future_bow'] = moves[id]['future_mid'].get_neighbour(moves[id]['future_rotation'])
+
+
+        # for all ships that still have a rotation update it
+        for move in moves.values():
+            if move['move'] in ['STARBOARD', 'PORT']:
+                move['current_position'].rotation = move['future_rotation']
+
+        if check_id is not None:
+            # Perform another set of tests forward incase we screw ourselves over
+            for speed in range(2):
+                for move in moves.values():
+                    if move['current_position'].speed > speed:
+                        move['future_stern'] = Position(move['current_position'].x, move['current_position'].y)
+                        move['future_mid'] = move['current_position'].get_neighbour(move['current_position'].rotation)
+                        move['future_bow'] = move['future_mid'].get_neighbour(move['current_position'].rotation)
+
+                        move['future_mid'].rotation = move['current_position'].rotation
+                        move['future_mid'].speed = move['current_position'].speed
+                    else:
+                        move['future_mid'] = Position(move['current_position'].x, move['current_position'].y, move['current_position'].rotation, move['current_position'].speed)
+                        move['future_stern'] = move['future_mid'].get_neighbour(self.map.abs_rotation(move['current_position'].rotation-3))
+                        move['future_bow'] = move['future_mid'].get_neighbour(move['current_position'].rotation)
+
+                # Check for speed 1 collisions
+                collision = True
+                while collision:
+                    reset_ids = []
+                    collision = False
+                    for id, move in moves.items():
+                        if move['current_position'].speed < speed+1:
+                            continue
+                        for id_opposing, move_opposing in moves.items():
+                            if id == id_opposing:
+                                continue
+                            if move['future_bow'].x == move_opposing['future_bow'].x and move['future_bow'].y == move_opposing['future_bow'].y or \
+                                    move['future_bow'].x == move_opposing['future_mid'].x and move['future_bow'].y == move_opposing['future_mid'].y or \
+                                    move['future_bow'].x == move_opposing['future_stern'].x and move['future_bow'].y == move_opposing['future_stern'].y:
+                                reset_ids.append(id)
+                                collision = True
+                                log('id: {} crashed into id:{}'.format(id, id_opposing))
+                                if check_id == id:
+                                    return True
+                                break
+
+                    for id in reset_ids:
+                        moves[id]['current_position'].speed = 0
+
+                        moves[id]['future_bow'] = moves[id]['future_mid']
+                        moves[id]['future_mid'] = moves[id]['current_position']
+                        moves[id]['future_stern'] = moves[id]['future_mid'].get_neighbour(self.map.abs_rotation(moves[id]['current_position'].rotation - 3))
+
+                        moves[id]['move'] = 'WAIT' if moves[id]['move'] in ['STARBOARD', 'PORT'] else moves[id]['move']
+
+                # For all the ships that have a speed > 0 update their current position to the future position
+                for move in moves.values():
+                    if move['current_position'].speed > speed:
+                        move['current_position'] = move['future_mid']
+
+        if check_id is not None:
+            return False
+        elif overview:
+            return overview_set
 
 
 class Map:
@@ -1173,6 +1462,9 @@ class Entity:
         self.x = x
         self.y = y
 
+    def get_neighbour(self, direction):
+        return self.get_neighbor(direction)
+
     def get_neighbor(self, direction):
         oddr_directions = [
             [Position(+1, 0), Position(0, -1), Position(-1, -1),
@@ -1239,6 +1531,8 @@ class Ship(Entity):
         self.mine = 10
 
         self.action = None
+        self.str_action = 'WAIT'
+        self.ignore_mine = False
 
         # Fire Action
         self.fire_x, self.fire_y = 0, 0
@@ -1264,6 +1558,8 @@ class Ship(Entity):
         self.mine += 1
 
         self.action = None
+        self.str_action = 'WAIT'
+        self.ignore_mine = False
 
     def fire(self, entity):
         #log('firing on ship({}) ({},{})'.format(entity.id, entity.x, entity.y))
@@ -1337,17 +1633,20 @@ class Ship(Entity):
         else:
             rem_forward = False
 
-        for neighbour in self.graph.map.neighbours(self.fire_x, self.fire_y):
-            if 0 <= neighbour[1] < self.graph.map.y and 0 <= neighbour[0] < self.graph.map.x:
-                if self.graph.map.grid[neighbour[1]][neighbour[0]] == MINE:
-                    self.fire_x, self.fire_y = neighbour[0], neighbour[1]
-                    #log('Firing on mine')
-                    break
+        if not self.ignore_mine:
+            for neighbour in self.graph.map.neighbours(self.fire_x, self.fire_y):
+                if 0 <= neighbour[1] < self.graph.map.y and 0 <= neighbour[0] < self.graph.map.x:
+                    if self.graph.map.grid[neighbour[1]][neighbour[0]] == MINE:
+                        self.fire_x, self.fire_y = neighbour[0], neighbour[1]
+                        #log('Firing on mine')
+                        break
 
         #log('FIRE : estimated_time:{} : target_point:({},{}) : distance:{}'.format(fire_time, self.fire_x, self.fire_y, distance))
 
         deque(map(lambda node: self.graph.remove_ship_node(node[0], node[1]),
                   self.graph.get_ship_nodes(self, rem_forward=rem_forward)))
+
+        self.str_action = 'FIRE {} {}'.format(self.fire_x, self.fire_y)
 
         return True
 
@@ -1392,6 +1691,8 @@ class Ship(Entity):
         deque(map(lambda node: self.graph.remove_ship_node(node[0], node[1]),
           self.graph.get_ship_nodes(self, rem_forward=rem_forward)))
 
+        self.str_action = 'MINE'
+
     def _print_mine(self):
         print('MINE MINE')
 
@@ -1406,6 +1707,8 @@ class Ship(Entity):
 
         deque(map(lambda node: self.graph.remove_ship_node(node[0], node[1]),
                   self.graph.get_ship_nodes(self, rem_forward=rem_forward)))
+
+        self.str_action = 'WAIT'
 
     def _print_no_action(self):
         print('WAIT WAIT')
@@ -1453,6 +1756,7 @@ class Ship(Entity):
         self.action = self._print_navigate
 
         log('navigate_action: {}'.format(self.navigate_action))
+        self.str_action = self.navigate_action
         return True
 
     def get_closest_enemy_ship(self, ship, enemy_ships):
@@ -1773,7 +2077,16 @@ class AI:
                         log('ship ({}) no_action'.format(id))
                         ship.no_action()
 
+            moves = {}
+            for id, ship in self.game.my_ships.items():
+                moves[id] = ship.str_action
 
+            for id in self.game.enemy_ships:
+                moves[id] = 'WAIT'
+
+            # timer.print('Start collisions')
+            # self.game.graph.calculate_collisions(moves)
+            # timer.print('End collisions')
 
             for id, ship in self.game.my_ships.items():
                 log(str(ship.action))

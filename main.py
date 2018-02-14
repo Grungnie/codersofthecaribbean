@@ -33,6 +33,7 @@ MAYBE = 2
 
 # Set these to control the cost of each modifier
 CANNONBALL_COST = 200
+CANNONBALL_PARTIAL_COST = 148
 MINE_COST = 150
 SHIP_COST = 15
 MY_SHIP_COST = 15
@@ -48,9 +49,20 @@ COLLISION_PORT_COST = all_set
 COLLISION_WAIT_COST = 20
 COLLISION_WAIT_NO_COOLDOWN_COST = all_set
 
-SPEED_MULTI = 1.2
-STRAIGHT_MULTI = 1.6
-EDGE_MULTI = 1.4
+# More speed reduces the chance of been hit
+WINNING_SPEED_MULTI = 2
+WINNING_STRAIGHT_MULTI = 1
+WINNING_EDGE_MULTI = 1.8
+
+# This should ensure it takes the shortest route possible
+BARREL_SPEED_MULTI = 1
+BARREL_STRAIGHT_MULTI = 0.9
+
+# More chance of shooting
+LOSING_SPEED_MULTI = 1
+LOSING_STRAIGHT_MULTI = 1.8
+LOSING_EDGE_MULTI = 1.8
+
 PLANNED_MULTI = 0.8
 
 CLOSE_SPEED_MULTI = 2
@@ -108,9 +120,9 @@ class Game:
         self.my_ship_count = None
         self.entity_count = None
 
-    def get_all_inputs(self, load=False):
+    def get_all_inputs(self, load=False, file='data.json'):
         if load:
-            self.inputs = json.load(open('data.json'))[load]
+            self.inputs = json.load(open(file))[load]
         else:
             self.inputs['entities'] = list()
 
@@ -132,8 +144,8 @@ class Game:
 
             log(json.dumps(self.inputs))
 
-    def update_map(self, load=False):
-        self.get_all_inputs(load=load)
+    def update_map(self, load=False, file='data.json'):
+        self.get_all_inputs(load=load, file=file)
         timer.print('inputs')
 
         self.clear_last_turn()
@@ -156,10 +168,6 @@ class Game:
 
         self.map.determine_waypoints(self)
         timer.print('determined waypoints')
-
-        # self.print_map(waypoints=True)
-        self.apply_collisions()
-        timer.print('apply collisions')
 
 
     def print_map(self,  waypoints=False):
@@ -260,15 +268,14 @@ class Game:
         for id in remove_ids:
             del self.mines[id]
 
-        log('{} active mines'.format(len(self.mines)))
+        #log('{} active mines'.format(len(self.mines)))
 
     def apply_collisions(self):
         moves = {}
         for ship_set in [self.my_ships, self.enemy_ships]:
-            for id in ship_set:
-                moves[id] = 'WAIT'
+            for id, ship in ship_set.items():
+                moves[id] = ship.str_action
         collisions = self.graph.calculate_collisions(moves, overview=True)
-        log(collisions)
 
         for id, speed in collisions.items():
             if id in self.enemy_ships:
@@ -543,8 +550,10 @@ class Graph:
 
         # Check for cannonball cost
         for test_step in [t-x for x in range(-1,0) if 14 >= t-x >= 0]:
-            if full_key in self.full_cannonball_nodes[test_step] or key in self.partial_cannonball_nodes[test_step]:
+            if full_key in self.full_cannonball_nodes[test_step]:
                 return CANNONBALL_COST
+            elif key in self.partial_cannonball_nodes[test_step]:
+                return CANNONBALL_PARTIAL_COST
 
         if full_key in self.full_mine_nodes or key in self.partial_mine_nodes:
             return MINE_COST
@@ -554,7 +563,9 @@ class Graph:
             potential_cost = MINE_RADII_COST
 
         if full_key in self.full_ship_nodes or key in self.partial_ship_nodes:
-            cost = SHIP_COST / (1+t**2)
+            cost = SHIP_COST / (1 + t ** 2)
+            if len(self.game.barrels) > 0:
+                cost /= 2
             return cost if cost > potential_cost else potential_cost
         elif full_key in self.my_full_ship_nodes or key in self.my_partial_ship_nodes:
             cost = MY_SHIP_COST / (1+t**2)
@@ -572,7 +583,7 @@ class Graph:
         self.full_cannonball_nodes[t].add(self.encode_node_key(x, y, 0, 0))
 
     def remove_partial_cannonball_nodes(self, x, y, t):
-        deque(map(lambda r: self.partial_cannonball_nodes[t].update(self.node_partials(x, y, r)), range(6)))
+        deque(map(lambda r: self.partial_cannonball_nodes[t].update(self.node_partials(x, y, r, cannonball=True)), range(6)))
 
     def remove_mine_node(self, x, y):
         self.full_mine_nodes.add(self.encode_node_key(x, y, 0, 0))
@@ -635,7 +646,10 @@ class Graph:
         nodes.append((ship.x, ship.y))
         nodes.append((bow.x, bow.y))
         nodes.append((stern.x, stern.y))
-        nodes.append((mine.x, mine.y))
+
+        if not self.map.out_of_range(Position(mine.x, mine.y)) and ship.id in self.game.enemy_ships:
+            self.remove_mine_node(mine.x, mine.y)
+            self.remove_partial_mine_node(mine.x, mine.y)
 
         forward_move = bow.get_neighbor(ship.rotation)
         if rem_forward:
@@ -689,8 +703,11 @@ class Graph:
                         self.encode_node_key(further_neighbour.x, further_neighbour.y, self.map.abs_rotation(r+3), 2)
                     ]
 
-    def node_partials(self, x, y, r, full_ignore=None, partial_ignore=None):
+    def node_partials(self, x, y, r, full_ignore=None, partial_ignore=None, cannonball=False):
         partial_keys = self._node_partials[self.encode_node_key(x, y, r, 0)]
+
+        if cannonball:
+            partial_keys = partial_keys[:6]
 
         keys_1 = []
         if full_ignore is not None:
@@ -827,12 +844,34 @@ class Graph:
                 closest = distance
         return closest
 
-    def find_path(self, ship, entity, waypoints=None):
+    def find_path(self, ship, entity, waypoints=None, something=False):
+        timer.print('finding path')
         distance_to_entity = ship.calculate_distance_between(entity)
         waypoints = [entity] if waypoints is None else [entity] + waypoints
 
-        if not self.in_grid(entity):
-            return False
+        winning_team = None
+        highest_health = 0
+        for owner, ship_set in [(ME, self.game.my_ships.values()), (ENEMY, self.game.enemy_ships.values())]:
+            for _ship in ship_set:
+                if _ship.rum > highest_health:
+                    winning_team = owner
+                    highest_health = _ship.rum
+
+        if winning_team == ME:
+            base_speed_mod = WINNING_SPEED_MULTI
+            base_straight_mod = WINNING_STRAIGHT_MULTI
+            base_edge_mod = WINNING_EDGE_MULTI
+        else:
+            base_speed_mod = LOSING_SPEED_MULTI
+            base_straight_mod = LOSING_STRAIGHT_MULTI
+            base_edge_mod = LOSING_EDGE_MULTI
+
+        if len(self.game.barrels) > 0:
+            base_speed_mod = BARREL_SPEED_MULTI
+            base_straight_mod = BARREL_STRAIGHT_MULTI
+
+        # if not self.in_grid(entity):
+        #     return False
 
         frontier = []
         heapq.heappush(frontier, (0, (self.encode_node_key(ship.x, ship.y, ship.rotation, ship.speed, 0), 0)))
@@ -851,9 +890,12 @@ class Graph:
         moves = {}
         for ships_set in [self.game.enemy_ships.items(), self.game.my_ships.items()]:
             for id, col_ship in ships_set:
-                moves[id] = [col_ship.str_action]
-                #if ship.id != col_ship.id and ship.calculate_distance_between(col_ship) < 6:
-                check_ships[id] = col_ship
+                if ship.id == col_ship.id:
+                    check_ships[id] = col_ship
+                    moves[id] = [col_ship.str_action]
+                elif ship.calculate_distance_between(col_ship) < 6:
+                    check_ships[id] = col_ship
+                    moves[id] = [col_ship.str_action]
 
         collision_move = {
             'WAIT': False,
@@ -865,9 +907,10 @@ class Graph:
 
         for move in collision_move:
             moves[ship.id] = [move]
-            collision_move[move] = self.calculate_collisions(moves, check_id=ship.id)
+            collision_move[move] = self.calculate_collisions(moves, check_id=ship.id, ships=check_ships)
 
         log('collision result for {}, {}'.format(ship.id, collision_move))
+        timer.print('got collisions')
 
         # There was no possible option found to avoid crashing
         found_option = False
@@ -878,6 +921,7 @@ class Graph:
 
         if not found_option:
             ship.ignore_mine = True
+            log('no option found')
             return False
 
 
@@ -891,10 +935,10 @@ class Graph:
             if points_checked % 20 == 0:
                 log('WARNING: path > {}'.format(points_checked))
                 if points_checked > 150 and len(ok_solutions) > 0:
-                    log('ok solution found')
+                    #log('ok solution found')
                     break
                 if points_checked > 200:
-                    log('ok solution found')
+                    #log('ok solution found')
                     return False
 
             wait, current_waypoint, cur_x, cur_y, cur_r, cur_s = self.decode_node_key(current)
@@ -935,6 +979,13 @@ class Graph:
                     ok_solutions.append(current_point)
                     current_waypoint += 1
 
+            if something:
+                if timestep > 5:
+                    current_point = self.encode_node_key(cur_x, cur_y, cur_r, cur_s, current_waypoint, wait)
+                    ok_solutions.append(current_point)
+                    break
+
+
             for next in self.neighbours(current_no_w):
                 # It is waiting
                 if next.x == cur_x and next.y == cur_y and next.rotation == cur_r and next.speed == cur_s:
@@ -954,8 +1005,8 @@ class Graph:
                 else:
                     hex_cost = 0
 
-                speed_mod_value = SPEED_MULTI
-                straight_mod_value = STRAIGHT_MULTI
+                speed_mod_value = base_speed_mod
+                straight_mod_value = base_straight_mod
                 close_mine_penalty = 0
                 collision_penalty = 0
 
@@ -1005,7 +1056,7 @@ class Graph:
 
                 # Speed modifier - we prefer moving over not moving
                 speed_mod = speed_mod_value if next.speed > 0 else 1
-                edge_mod = EDGE_MULTI if self.map.edge(Position(next.x, next.y)) else 1
+                edge_mod = base_edge_mod if self.map.edge(Position(next.x, next.y)) else 1
                 # Can we make a non-movement action?
                 if next.speed == cur_s and next.speed > 0 and next.rotation == cur_r:
                     straight_mod = 1
@@ -1021,7 +1072,7 @@ class Graph:
                                 next.rotation == ship.planned_next_target.rotation and \
                                 next.speed == ship.planned_next_target.speed:
                     planned_mod = PLANNED_MULTI
-                    log('planned_mod')
+                    #log('planned_mod')
 
 
 
@@ -1050,7 +1101,7 @@ class Graph:
         log('points checked: {}'.format(points_checked))
 
         if final_point is None or final_point == False:
-            log('No path from ({},{}) to ({},{})'.format(ship.x, ship.y, entity.x, entity.y))
+            #log('No path from ({},{}) to ({},{})'.format(ship.x, ship.y, entity.x, entity.y))
             return False
 
         current_key = final_point
@@ -1072,6 +1123,7 @@ class Graph:
         path.append((ship.x, ship.y, ship.rotation, ship.speed))
 
         log(str(path))
+        timer.print('path found')
 
         return path
 
@@ -1079,7 +1131,7 @@ class Graph:
         moves = {}
         overview_set = {}
 
-        log('check_id: {}'.format(check_id))
+        #log('check_id: {}'.format(check_id))
 
         if ships is None:
             for id, ship in self.game.my_ships.items():
@@ -1154,7 +1206,7 @@ class Graph:
                                 move['future_bow'].x == move_opposing['future_stern'].x and move['future_bow'].y == move_opposing['future_stern'].y:
                             reset_ids.append(id)
                             collision = True
-                            log('id: {} crashed into id:{}'.format(id, id_opposing))
+                            #log('id: {} crashed into id:{}'.format(id, id_opposing))
                             overview_set[id] = speed
                             if check_id == id:
                                 return True
@@ -1206,7 +1258,7 @@ class Graph:
                             move['future_stern'].x == move_opposing['future_stern'].x and move['future_stern'].y == move_opposing['future_stern'].y:
                         reset_ids.append(id)
 
-                        log('id: {} crashed into id:{}'.format(id, id_opposing))
+                        #log('id: {} crashed into id:{}'.format(id, id_opposing))
                         overview_set[id] = move['current_position'].speed
                         if check_id == id:
                             return True
@@ -1260,7 +1312,7 @@ class Graph:
                                     move['future_bow'].x == move_opposing['future_stern'].x and move['future_bow'].y == move_opposing['future_stern'].y:
                                 reset_ids.append(id)
                                 collision = True
-                                log('id: {} crashed into id:{}'.format(id, id_opposing))
+                                #log('id: {} crashed into id:{}'.format(id, id_opposing))
                                 if check_id == id:
                                     return True
                                 break
@@ -1447,7 +1499,7 @@ class Map:
                 if index not in self.waypoints:
                     self.waypoints[index] = Position(x,y)
 
-        log(self.waypoints)
+        #log(self.waypoints)
 
 class Cube:
     def __init__(self, x, y, z):
@@ -1633,6 +1685,10 @@ class Ship(Entity):
         else:
             rem_forward = False
 
+        if isinstance(entity, Ship) and entity.speed == 0:
+            self.ignore_mine = True
+
+        firing_on_mine = False
         if not self.ignore_mine:
             for neighbour in self.graph.map.neighbours(self.fire_x, self.fire_y):
                 if 0 <= neighbour[1] < self.graph.map.y and 0 <= neighbour[0] < self.graph.map.x:
@@ -1640,6 +1696,23 @@ class Ship(Entity):
                         self.fire_x, self.fire_y = neighbour[0], neighbour[1]
                         #log('Firing on mine')
                         break
+
+        if not self.ignore_mine and not firing_on_mine:
+            for neighbour in self.graph.map.neighbours(self.fire_x, self.fire_y):
+                if 0 <= neighbour[1] < self.graph.map.y and 0 <= neighbour[0] < self.graph.map.x:
+                    if self.graph.map.grid[neighbour[1]][neighbour[0]] == BARREL:
+                        point = Position(neighbour[0], neighbour[1])
+                        entity_distance = entity.calculate_distance_between(point)
+                        closest_ship = 10000
+                        for ship in self.graph.game.my_ships.values():
+                            distance = ship.calculate_distance_between(point)
+                            if distance < closest_ship:
+                                closest_ship = distance
+
+                        if (closest_ship + 3) > entity_distance:
+                            self.fire_x, self.fire_y = neighbour[0], neighbour[1]
+                            log('Firing on barrel')
+                            break
 
         #log('FIRE : estimated_time:{} : target_point:({},{}) : distance:{}'.format(fire_time, self.fire_x, self.fire_y, distance))
 
@@ -1743,7 +1816,10 @@ class Ship(Entity):
 
         path = self.graph.find_path(self, entity, waypoints=new_waypoints)
         if path == False:
-            return False
+            log('try to find something')
+            path = self.graph.find_path(self, entity, waypoints=new_waypoints, something=True)
+            if path == False:
+                return False
         self.navigate_action = self.determine_move(path[-2:])
 
         # Store the next move that was planned and make it a
@@ -1755,7 +1831,7 @@ class Ship(Entity):
 
         self.action = self._print_navigate
 
-        log('navigate_action: {}'.format(self.navigate_action))
+        #log('navigate_action: {}'.format(self.navigate_action))
         self.str_action = self.navigate_action
         return True
 
@@ -1787,9 +1863,9 @@ class Ship(Entity):
             ordered_waypoints = self.ordered_waypoints(enemy_ships)
             current_waypoints = [[ship.waypoint, ship.next_waypoint] for ship in my_ships.values() if ship.id != self.id]
             flattend_current_waypoints = [x for y in current_waypoints for x in y]
-            log('flattened waypoints: {}'.format(flattend_current_waypoints))
+            #log('flattened waypoints: {}'.format(flattend_current_waypoints))
             reduced_set = [waypoint for waypoint in ordered_waypoints if waypoint not in flattend_current_waypoints]
-            ordered_waypoints = [waypoint for waypoint in reduced_set if self.calculate_distance_between(self.graph.map.waypoints[waypoint]) > 3][:3]
+            ordered_waypoints = [waypoint for waypoint in reduced_set if self.calculate_distance_between(self.graph.map.waypoints[waypoint]) > 3][:2]
 
             if self.next_waypoint in ordered_waypoints:
                 self.waypoint = self.next_waypoint
@@ -1982,7 +2058,7 @@ class AI:
                 if barrel_ship[0].id in taken_barrels or barrel_ship[1].id in self.assigned_ships:
                     continue
 
-                log('ship ({}) navigating to barrel ({})'.format(barrel_ship[1].id, barrel_ship[0].id))
+                #log('ship ({}) navigating to barrel ({})'.format(barrel_ship[1].id, barrel_ship[0].id))
 
                 # Get possible next barrel
                 next_barrel = None
@@ -1999,17 +2075,25 @@ class AI:
 
                     next_barrel = self.game.map.waypoints[barrel_ship[1].next_waypoint]
 
+                barrel_id = barrel_ship[0].id
+                if not self.game.graph.in_grid(barrel_ship[0]):
+                    barrel_ship = list(barrel_ship)
+                    barrel_ship[0] = self.game.graph.find_closest(barrel_ship[0])
+                if not self.game.graph.in_grid(next_barrel):
+                    next_barrel = self.game.graph.find_closest(next_barrel)
+
+
                 self.assigned_ships[barrel_ship[1].id] = {'action': 'barrel',
                                                   'target_nav': barrel_ship[0],
                                                   'waypoints': [next_barrel]
                                                   }
 
-                taken_barrels.add(barrel_ship[0].id)
+                taken_barrels.add(barrel_id)
 
-                for dist_barrel in barrel_barrel_distances[barrel_ship[0].id]:
+                for dist_barrel in barrel_barrel_distances[barrel_id]:
                     if dist_barrel[1] <= 2:
                         taken_barrels.add(dist_barrel[0].id)
-                        log('taken: {}'.format(dist_barrel[0].id))
+                        #log('taken: {}'.format(dist_barrel[0].id))
                     else:
                         break
 
@@ -2025,77 +2109,84 @@ class AI:
 
     def run(self, load=False):
         while True:
-            self.assigned_ships = {}
+            self.turn(load)
 
-            time_a = time.time()
+    def turn(self, load=False, file='data.json'):
+        self.assigned_ships = {}
 
-            self.game.update_map(load=load)
+        time_a = time.time()
 
-            self.assign_barrels()
-            log('assigned barrels')
-            self.assign_waypoints()
-            log('assigned waypoints')
+        self.game.update_map(load=load, file=file)
 
-            for ship_id, navigation in self.assigned_ships.items():
-                self.game.graph.remove_ship_set([ship for ship in self.game.my_ships.values() if ship.id != ship_id])
-                result = self.game.my_ships[ship_id].navigate(navigation['target_nav'], waypoints=navigation['waypoints'])
-                if result:
-                    success = 'success'
-                else:
-                    success = 'failed'
-                    self.game.my_ships[ship_id].no_action()
+        self.assign_barrels()
+        #log('assigned barrels')
+        self.assign_waypoints()
+        #log('assigned waypoints')
 
-                log('{} - ship_id: {}, action: {}, target_nav: {}, waypoint: {}'.format(success,
-                                                                                        ship_id,
-                                                                                        navigation['action'],
-                                                                                        navigation['target_nav'],
-                                                                                        navigation['waypoints'][0]))
+        for ship_id, navigation in self.assigned_ships.items():
+            self.game.graph.remove_ship_set([ship for ship in self.game.my_ships.values() if ship.id != ship_id])
+            result = self.game.my_ships[ship_id].navigate(navigation['target_nav'], waypoints=navigation['waypoints'])
+            if result:
+                success = 'success'
+            else:
+                success = 'failed'
+                self.game.my_ships[ship_id].no_action()
 
-            for id, ship in self.game.my_ships.items():
-                closest_ship, distance_to_closest_ship = self.get_closest_enemy_ship(ship, self.game.enemy_ships)
-                if ship.navigate_action == 'WAIT' or ship.navigate_action is None or ship.action is None:
-                    lay_mine=MAYBE
-                    if ship.can_lay_mine():
-                        if not ship.guaranteed_mine_hit(self.game.my_ships):
-                            if ship.guaranteed_mine_hit(self.game.enemy_ships):
-                                log('Guaranteed Enemy')
-                                lay_mine = YES
-                        else:
-                            log('Guaranteed Me')
-                            lay_mine = NO
+            log('{} - ship_id: {}, action: {}, target_nav: {}, waypoint: {}'.format(success,
+                                                                                    ship_id,
+                                                                                    navigation['action'],
+                                                                                    navigation['target_nav'],
+                                                                                    navigation['waypoints'][0]))
 
-                    if ship.can_fire() and lay_mine != YES:
-                        result = ship.fire(closest_ship)
-                        if result:
-                            log('ship ({}) firing'.format(id))
-                            continue
 
-                    if lay_mine != NO:
-                        log('ship ({}) laying mine'.format(id))
-                        ship.lay_mine()
+        self.game.apply_collisions()
+        timer.print('apply collisions')
+
+        for id, ship in self.game.my_ships.items():
+            closest_ship, distance_to_closest_ship = self.get_closest_enemy_ship(ship, self.game.enemy_ships)
+            if ship.navigate_action == 'WAIT' or ship.navigate_action is None or ship.action is None:
+                lay_mine=MAYBE
+                if ship.can_lay_mine():
+                    if not ship.guaranteed_mine_hit(self.game.my_ships):
+                        if ship.guaranteed_mine_hit(self.game.enemy_ships):
+                            #log('Guaranteed Enemy')
+                            lay_mine = YES
                     else:
-                        log('ship ({}) no_action'.format(id))
-                        ship.no_action()
+                        #log('Guaranteed Me')
+                        lay_mine = NO
 
-            moves = {}
-            for id, ship in self.game.my_ships.items():
-                moves[id] = ship.str_action
+                if ship.can_fire() and lay_mine != YES:
+                    result = ship.fire(closest_ship)
+                    if result:
+                        #log('ship ({}) firing'.format(id))
+                        continue
 
-            for id in self.game.enemy_ships:
-                moves[id] = 'WAIT'
+                if lay_mine != NO:
+                    #log('ship ({}) laying mine'.format(id))
+                    ship.lay_mine()
+                else:
+                    #log('ship ({}) no_action'.format(id))
+                    ship.no_action()
 
-            # timer.print('Start collisions')
-            # self.game.graph.calculate_collisions(moves)
-            # timer.print('End collisions')
+        moves = {}
+        for id, ship in self.game.my_ships.items():
+            moves[id] = ship.str_action
 
-            for id, ship in self.game.my_ships.items():
-                log(str(ship.action))
-                ship.print_action()
+        for id in self.game.enemy_ships:
+            moves[id] = 'WAIT'
 
-            time_b = time.time()
-            dif = time_b - time_a
-            timer.print('done')
-            log('Loop took {}ms'.format(round(dif*1000,2)))
+        # timer.print('Start collisions')
+        # self.game.graph.calculate_collisions(moves)
+        # timer.print('End collisions')
+
+        for id, ship in self.game.my_ships.items():
+            #log(str(ship.action))
+            ship.print_action()
+
+        time_b = time.time()
+        dif = time_b - time_a
+        timer.print('done')
+        log('Loop took {}ms'.format(round(dif*100,2)))
 
 
 if __name__ == "__main__":
